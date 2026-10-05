@@ -8,6 +8,13 @@
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>Mini Golf</title>
+  <meta name="description" content="Your turn! Tap to take your shot.">
+  <meta property="og:title" content="Mini Golf ⛳ Your turn!">
+  <meta property="og:description" content="Tap to watch your friend's shot and take yours.">
+  <meta property="og:type" content="website">
+  <meta property="og:image" content="https://rjd7004.github.io/minigolf/preview.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="apple-touch-icon" href="icon.png">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -18,10 +25,10 @@
         <span class="name">Player 1</span>
         <span class="strokes">0</span>
       </div>
-      <div id="hole-info">
+      <button id="hole-info" type="button" aria-label="New game">
         <div class="hole-label">Hole 1</div>
         <div class="par-label">Par 3</div>
-      </div>
+      </button>
       <div class="player-card" data-player="1">
         <span class="strokes">0</span>
         <span class="name">Player 2</span>
@@ -32,21 +39,52 @@
     <main id="stage">
       <canvas id="course" aria-label="Mini golf course"></canvas>
       <div id="banner" aria-live="polite"></div>
+      <div id="waitbar" class="hidden">
+        <span id="wait-text">Waiting for your friend</span>
+        <button id="resend-btn" type="button">Send link</button>
+      </div>
     </main>
 
-    <div id="menu" class="overlay">
+    <div id="menu" class="overlay hidden" data-mode="link">
       <div class="panel">
         <h1>Mini Golf</h1>
         <p class="sub">Drag back from anywhere to aim. Pull further for more power. Let go to putt.</p>
+        <div class="seg" role="tablist">
+          <button type="button" data-mode="link">Play a friend</button>
+          <button type="button" data-mode="local">Same phone</button>
+        </div>
+        <p id="mode-help" class="help"></p>
         <label class="name-field p0">
           <span class="dot"></span>
-          <input id="name0" maxlength="12" placeholder="Player 1" autocomplete="off">
+          <input id="name0" maxlength="12" placeholder="Your name" autocomplete="off">
         </label>
-        <label class="name-field p1">
+        <label class="name-field p1 local-only">
           <span class="dot"></span>
           <input id="name1" maxlength="12" placeholder="Player 2" autocomplete="off">
         </label>
-        <button id="start-btn" class="btn">Tee off</button>
+        <button id="start-btn" class="btn" type="button">Tee off</button>
+      </div>
+    </div>
+
+    <div id="join" class="overlay hidden">
+      <div class="panel">
+        <h1 id="join-title">You've been challenged!</h1>
+        <p id="join-text" class="sub"></p>
+        <label class="name-field p1">
+          <span class="dot"></span>
+          <input id="join-name" maxlength="12" placeholder="Your name" autocomplete="off">
+        </label>
+        <button id="join-btn" class="btn" type="button">Let's play</button>
+      </div>
+    </div>
+
+    <div id="share" class="overlay hidden">
+      <div class="panel">
+        <h1 id="share-title">Their turn</h1>
+        <p id="share-text" class="sub"></p>
+        <button id="share-btn" class="btn" type="button">Send link</button>
+        <button id="copy-btn" class="btn secondary" type="button">Copy link</button>
+        <button id="view-btn" class="btn ghost" type="button">View course</button>
       </div>
     </div>
 
@@ -54,8 +92,9 @@
       <div class="panel">
         <h1 id="result-title">Game over</h1>
         <div id="result-rows"></div>
-        <button id="again-btn" class="btn">Play again</button>
-        <button id="menu-btn" class="btn ghost">Change players</button>
+        <button id="send-result-btn" class="btn hidden" type="button">Send result</button>
+        <button id="again-btn" class="btn secondary" type="button">Play again</button>
+        <button id="menu-btn" class="btn ghost" type="button">Change players</button>
       </div>
     </div>
   </div>

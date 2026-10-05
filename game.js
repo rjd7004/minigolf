@@ -52,34 +52,50 @@
   COURSE.blocks.forEach(addPolygon);
 
   // ---------- DOM ----------
-  const canvas = document.getElementById('course');
+  const $ = (id) => document.getElementById(id);
+  const canvas = $('course');
   const ctx = canvas.getContext('2d');
-  const stage = document.getElementById('stage');
-  const banner = document.getElementById('banner');
-  const menu = document.getElementById('menu');
-  const results = document.getElementById('results');
+  const stage = $('stage');
+  const banner = $('banner');
+  const menu = $('menu');
+  const results = $('results');
+  const sharePanel = $('share');
+  const joinPanel = $('join');
+  const waitBar = $('waitbar');
   const cards = [...document.querySelectorAll('.player-card')];
-  const nameInputs = [document.getElementById('name0'), document.getElementById('name1')];
+  const nameInputs = [$('name0'), $('name1')];
 
   // ---------- State ----------
   const state = {
-    phase: 'menu', // menu | aim | rolling | sinking | splash | over
+    mode: 'link',   // link: each player on their own phone, turns sent as links | local: pass & play
+    phase: 'menu',  // menu | join | aim | rolling | anim | share | over
+    id: '',         // game id (link mode)
+    seq: 0,         // bumps on every committed change so stale links can be detected
+    me: 0,          // which player this device is (link mode)
     players: [makePlayer('Player 1'), makePlayer('Player 2')],
     turn: 0,
     starter: 0,
-    shotFrom: null, // ball position before the current shot (for water / out of bounds)
+    lastShot: null, // { p, x, y, a, w }: the most recent shot, replayed for the other player
+    roll: null,     // { ball, from, player, onEvent } while a ball is moving
+    anim: null,     // { kind: 'sink' | 'splash', t, x, y, player, onDone }
     aim: null,      // { sx, sy, cx, cy } in world coords while dragging
-    sinkT: 0,
-    splashT: 0,
     time: 0,
   };
 
   function makePlayer(name) {
-    return { name, strokes: 0, done: false, ball: { x: 0, y: 0, vx: 0, vy: 0 } };
+    return { name, strokes: 0, done: false, ball: { x: COURSE.tee.x, y: COURSE.tee.y, vx: 0, vy: 0 } };
   }
 
   function current() {
     return state.players[state.turn];
+  }
+
+  function nameOf(i) {
+    return state.players[i].name || (i === 1 ? 'Friend' : 'Player 1');
+  }
+
+  function isLink() {
+    return state.mode === 'link';
   }
 
   // ---------- Layout ----------
@@ -102,7 +118,8 @@
   window.addEventListener('resize', resize);
   window.addEventListener('orientationchange', () => setTimeout(resize, 200));
 
-  // ---------- Game flow ----------
+
+  // ---------- Saved names ----------
   function loadNames() {
     try {
       const saved = JSON.parse(localStorage.getItem('minigolf-names') || '[]');
@@ -110,125 +127,255 @@
     } catch (e) { /* storage unavailable */ }
   }
 
-  function saveNames(names) {
-    try { localStorage.setItem('minigolf-names', JSON.stringify(names)); } catch (e) { /* ignore */ }
+  function saveName(i, name) {
+    try {
+      const saved = JSON.parse(localStorage.getItem('minigolf-names') || '[]');
+      saved[i] = name;
+      localStorage.setItem('minigolf-names', JSON.stringify(saved));
+    } catch (e) { /* ignore */ }
   }
 
-  function startGame() {
-    const names = nameInputs.map((inp, i) => inp.value.trim() || `Player ${i + 1}`);
-    saveNames(nameInputs.map((inp) => inp.value.trim()));
+  // ---------- Starting games ----------
+  function newGame(mode, names, starter, me) {
+    state.mode = mode;
+    state.id = mode === 'link' ? randomId() : '';
+    state.seq = 0;
+    state.me = me;
     state.players = names.map(makePlayer);
-    state.players.forEach((p) => resetBallToTee(p));
-    state.turn = state.starter;
-    state.aim = null;
-    state.phase = 'aim';
-    menu.classList.add('hidden');
-    results.classList.add('hidden');
-    updateHud();
-    showBanner(`${current().name} tees off`, COLORS[state.turn]);
+    state.turn = starter;
+    state.starter = starter;
+    state.lastShot = null;
+    state.roll = state.anim = state.aim = null;
+    hideOverlays();
+    if (isLink()) commit();
+    else history.replaceState(null, '', location.pathname + location.search);
+    routeTurn();
   }
 
-  function resetBallToTee(p) {
-    p.ball.x = COURSE.tee.x;
-    p.ball.y = COURSE.tee.y;
-    p.ball.vx = p.ball.vy = 0;
+  function startFromMenu() {
+    sound.unlock();
+    const mode = menu.dataset.mode;
+    const n0 = nameInputs[0].value.trim();
+    const n1 = nameInputs[1].value.trim();
+    saveName(0, n0);
+    if (mode === 'local') {
+      saveName(1, n1);
+      newGame('local', [n0 || 'Player 1', n1 || 'Player 2'], 0, 0);
+    } else {
+      // Your friend fills in their own name when they open the link.
+      newGame('link', [n0 || 'Player 1', ''], 0, 0);
+    }
   }
 
-  function shoot(power, dirX, dirY) {
+  function rematch() {
+    const names = state.players.map((p) => p.name);
+    newGame(state.mode, names, 1 - state.starter, state.me);
+  }
+
+  function randomId() {
+    const a = new Uint8Array(6);
+    crypto.getRandomValues(a);
+    return [...a].map((b) => b.toString(36).padStart(2, '0')).join('').slice(0, 10);
+  }
+
+  // ---------- Turn flow ----------
+  function shoot(power, angle) {
     const p = current();
+    // Quantise so the replay on the other phone runs exactly the same numbers.
+    power = Math.round(power * 1e4) / 1e4;
+    angle = Math.round(angle * 1e4) / 1e4;
     p.strokes++;
-    state.shotFrom = { x: p.ball.x, y: p.ball.y };
-    const speed = power * MAX_SPEED;
-    p.ball.vx = dirX * speed;
-    p.ball.vy = dirY * speed;
+    const from = { x: p.ball.x, y: p.ball.y };
+    state.lastShot = { p: state.turn, x: from.x, y: from.y, a: angle, w: power };
+    launch(p.ball, from, power, angle);
+    state.roll = { ball: p.ball, from, player: state.turn, onEvent: resolveShot };
     state.phase = 'rolling';
     updateHud();
     sound.hit(power);
   }
 
-  function endShot() {
-    const p = current();
-    p.ball.vx = p.ball.vy = 0;
-    if (!p.done && p.strokes >= MAX_STROKES) {
-      p.done = true;
-      showBanner(`${p.name}: max ${MAX_STROKES} strokes`, COLORS[state.turn]);
-    }
-    nextTurn();
+  function launch(ball, from, power, angle) {
+    ball.x = from.x;
+    ball.y = from.y;
+    ball.vx = Math.cos(angle) * power * MAX_SPEED;
+    ball.vy = Math.sin(angle) * power * MAX_SPEED;
   }
 
-  function nextTurn() {
+  function resolveShot(ev) {
+    const i = state.turn;
+    const p = current();
+    const { ball, from } = state.roll;
+    state.roll = null;
+    if (ev === 'sink') {
+      p.done = true;
+      sound.sink();
+      if (navigator.vibrate) navigator.vibrate([30, 40, 60]);
+      showBanner(`${isLink() && i === state.me ? 'You' : nameOf(i)}: ${scoreName(p.strokes)}`, COLORS[i], 1500);
+      startAnim('sink', ball, i, afterShot);
+    } else if (ev === 'water') {
+      p.strokes++; // penalty stroke
+      sound.splash();
+      showBanner('Splash! +1 stroke', '#3fa7e0', 1300);
+      updateHud();
+      startAnim('splash', ball, i, () => {
+        ball.x = from.x;
+        ball.y = from.y;
+        afterShot();
+      });
+    } else {
+      afterShot();
+    }
+  }
+
+  function afterShot() {
+    const p = current();
+    p.ball.vx = p.ball.vy = 0;
+    p.ball.x = Math.round(p.ball.x * 100) / 100;
+    p.ball.y = Math.round(p.ball.y * 100) / 100;
+    if (!p.done && p.strokes >= MAX_STROKES) {
+      p.done = true;
+      showBanner(`${nameOf(state.turn)}: max ${MAX_STROKES} strokes`, COLORS[state.turn]);
+    }
+    const other = 1 - state.turn;
+    if (!state.players[other].done) state.turn = other;
+    if (isLink()) commit();
+    routeTurn();
+  }
+
+  // Decide what happens next: game over, my shot, or hand the turn to my friend.
+  function routeTurn() {
     updateHud();
     if (state.players.every((p) => p.done)) {
       state.phase = 'over';
       setTimeout(showResults, 900);
       return;
     }
-    const other = 1 - state.turn;
-    if (!state.players[other].done) state.turn = other;
-    state.phase = 'aim';
-    updateHud();
-    const p = current();
-    // Announce the next turn once any score / penalty banner has finished.
-    const wait = Math.max(250, bannerEnd - performance.now());
-    setTimeout(() => {
-      if (state.phase === 'aim' && current() === p) showBanner(`${p.name}'s turn`, COLORS[state.turn]);
-    }, wait);
+    if (!isLink() || state.turn === state.me) {
+      state.phase = 'aim';
+      const i = state.turn;
+      const text = isLink() ? 'Your turn' : `${nameOf(i)}'s turn`;
+      const wait = Math.max(250, bannerEnd - performance.now());
+      setTimeout(() => {
+        if (state.phase === 'aim' && state.turn === i) showBanner(text, COLORS[i]);
+      }, wait);
+      return;
+    }
+    state.phase = 'share';
+    setTimeout(() => { if (state.phase === 'share') showShare(); }, 700);
   }
 
-  function holeOut() {
-    const p = current();
-    p.done = true;
-    state.phase = 'sinking';
-    state.sinkT = 0;
-    sound.sink();
-    if (navigator.vibrate) navigator.vibrate([30, 40, 60]);
-    showBanner(`${p.name}: ${scoreName(p.strokes)}`, COLORS[state.turn], 1500);
-  }
-
-  function splash() {
-    const p = current();
-    state.phase = 'splash';
-    state.splashT = 0;
-    state.splashAt = { x: p.ball.x, y: p.ball.y };
-    p.ball.vx = p.ball.vy = 0;
-    p.strokes++; // penalty stroke
-    sound.splash();
-    showBanner('Splash! +1 stroke', '#3fa7e0', 1300);
-    updateHud();
+  function startAnim(kind, ball, player, onDone) {
+    state.anim = { kind, t: 0, x: ball.x, y: ball.y, player, onDone };
+    state.phase = 'anim';
   }
 
   function scoreName(strokes) {
     if (strokes === 1) return 'Hole in one!';
     const names = { '-3': 'Albatross!', '-2': 'Eagle!', '-1': 'Birdie!', '0': 'Par', '1': 'Bogey', '2': 'Double bogey' };
-    const rel = strokes - PAR;
-    return names[rel] || `${strokes} strokes`;
+    return names[strokes - PAR] || `${strokes} strokes`;
+  }
+
+  // ---------- Panels ----------
+  function hideOverlays() {
+    [menu, results, sharePanel, joinPanel].forEach((el) => el.classList.add('hidden'));
+    waitBar.classList.add('hidden');
+  }
+
+  function showMenu() {
+    hideOverlays();
+    state.phase = 'menu';
+    state.roll = state.anim = state.aim = null;
+    menu.classList.remove('hidden');
+    updateHud();
+  }
+
+  function setMenuMode(mode) {
+    menu.dataset.mode = mode;
+    menu.querySelectorAll('.seg button').forEach((b) => b.classList.toggle('on', b.dataset.mode === mode));
+    $('start-btn').textContent = mode === 'local' ? 'Tee off' : 'Start & take first shot';
+    nameInputs[0].placeholder = mode === 'local' ? 'Player 1' : 'Your name';
+    $('mode-help').textContent = mode === 'local'
+      ? 'Two players, one phone. Pass it back and forth.'
+      : "You take a shot, then text your friend a link. They play their shot on their phone and send one back.";
   }
 
   function showResults() {
+    hideOverlays();
     const [a, b] = state.players;
-    const title = document.getElementById('result-title');
-    if (a.strokes === b.strokes) title.textContent = "It's a tie!";
-    else title.textContent = `${(a.strokes < b.strokes ? a : b).name} wins!`;
-    const best = Math.min(a.strokes, b.strokes);
-    const rows = document.getElementById('result-rows');
+    const winner = a.strokes === b.strokes ? -1 : (a.strokes < b.strokes ? 0 : 1);
+    let title = winner < 0 ? "It's a tie!" : `${nameOf(winner)} wins!`;
+    if (isLink() && winner >= 0) title = winner === state.me ? 'You win!' : `${nameOf(winner)} wins!`;
+    $('result-title').textContent = title;
+    const rows = $('result-rows');
     rows.innerHTML = '';
     state.players.forEach((p, i) => {
       const row = document.createElement('div');
-      row.className = `result-row p${i}` + (p.strokes === best && a.strokes !== b.strokes ? ' winner' : '');
+      row.className = `result-row p${i}` + (i === winner ? ' winner' : '');
       const rel = p.strokes - PAR;
       row.innerHTML = '<span class="dot"></span><span class="name"></span><span class="score"></span><span class="rel"></span>';
-      row.querySelector('.name').textContent = p.name;
+      row.querySelector('.name').textContent = nameOf(i);
       row.querySelector('.score').textContent = p.strokes;
       row.querySelector('.rel').textContent = rel === 0 ? 'E' : (rel > 0 ? `+${rel}` : `${rel}`);
       rows.appendChild(row);
     });
+    const send = $('send-result-btn');
+    send.classList.toggle('hidden', !isLink());
+    send.textContent = `Send result to ${nameOf(1 - state.me)}`;
+    $('again-btn').textContent = isLink() ? 'Rematch' : 'Play again';
+    $('again-btn').classList.toggle('secondary', isLink());
+    $('menu-btn').textContent = isLink() ? 'New game' : 'Change players';
     results.classList.remove('hidden');
+  }
+
+  function showShare() {
+    hideOverlays();
+    const joined = !!state.players[1].name;
+    const friend = joined ? nameOf(state.turn) : 'your friend';
+    $('share-title').textContent = joined ? `${friend}'s turn` : 'Challenge a friend';
+    $('share-text').textContent = state.lastShot
+      ? `Send ${friend} the link. They'll watch your shot, then take theirs.`
+      : `Send ${friend} the link so they can tee off.`;
+    $('share-btn').textContent = joined ? `Send to ${friend}` : 'Send link';
+    $('copy-btn').textContent = 'Copy link';
+    sharePanel.classList.remove('hidden');
+  }
+
+  function showWaitBar() {
+    hideOverlays();
+    const friend = state.players[1].name ? nameOf(state.turn) : 'your friend';
+    $('wait-text').textContent = `Waiting for ${friend}`;
+    waitBar.classList.remove('hidden');
+  }
+
+  function showJoin() {
+    hideOverlays();
+    const host = nameOf(0);
+    $('join-title').textContent = `${host} challenged you!`;
+    $('join-text').textContent = state.lastShot
+      ? `Enter your name, watch ${host}'s first shot, then take yours.`
+      : 'Enter your name to tee off.';
+    const saved = nameInputs[0].value.trim();
+    $('join-name').value = saved && saved !== host ? saved : '';
+    joinPanel.classList.remove('hidden');
+  }
+
+  function join() {
+    sound.unlock();
+    const name = $('join-name').value.trim() || 'Player 2';
+    state.players[1].name = name;
+    saveName(0, name); // on this phone, you're the one typing in the first box
+    nameInputs[0].value = name;
+    commit();
+    hideOverlays();
+    playReplayThenRoute();
   }
 
   function updateHud() {
     state.players.forEach((p, i) => {
       const card = cards[i];
-      card.querySelector('.name').textContent = p.name;
+      let name = nameOf(i);
+      if (isLink() && state.phase !== 'menu' && i === state.me) name += ' (you)';
+      card.querySelector('.name').textContent = name;
       card.querySelector('.strokes').textContent = p.strokes;
       const active = state.phase !== 'menu' && state.phase !== 'over' && i === state.turn && !p.done;
       card.classList.toggle('active', active);
@@ -245,6 +392,227 @@
     banner.classList.add('show');
     clearTimeout(bannerTimer);
     bannerTimer = setTimeout(() => banner.classList.remove('show'), ms);
+  }
+
+  // ---------- Sharing turns as links ----------
+  // The whole game lives in the URL fragment (#g=...), so no server is needed.
+  // Each phone also remembers the newest state it has seen per game, so reopening
+  // an old link can't be used to retake a shot.
+
+  function b64urlEncode(str) {
+    const bytes = new TextEncoder().encode(str);
+    let bin = '';
+    bytes.forEach((b) => { bin += String.fromCharCode(b); });
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+
+  function b64urlDecode(s) {
+    const bin = atob(s.replace(/-/g, '+').replace(/_/g, '/'));
+    return new TextDecoder().decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
+  }
+
+  function encodeGame() {
+    const ls = state.lastShot;
+    return b64urlEncode(JSON.stringify({
+      v: 1,
+      i: state.id,
+      s: state.seq,
+      t: state.turn,
+      f: state.starter,
+      p: state.players.map((p) => [p.name, p.strokes, p.done ? 1 : 0, p.ball.x, p.ball.y]),
+      l: ls ? [ls.p, ls.x, ls.y, ls.a, ls.w] : 0,
+    }));
+  }
+
+  function decodeGame(code) {
+    try {
+      const o = JSON.parse(b64urlDecode(code));
+      const num = (n, lo, hi) => typeof n === 'number' && Number.isFinite(n) && n >= lo && n <= hi;
+      if (o.v !== 1 || typeof o.i !== 'string' || !/^[a-z0-9]{1,16}$/.test(o.i)) return null;
+      if (!num(o.s, 0, 1e6) || ![0, 1].includes(o.t) || ![0, 1].includes(o.f)) return null;
+      if (!Array.isArray(o.p) || o.p.length !== 2) return null;
+      const players = o.p.map((a) => {
+        if (!Array.isArray(a) || typeof a[0] !== 'string' || !num(a[1], 0, 30)) return null;
+        const p = makePlayer(a[0].slice(0, 12));
+        p.strokes = Math.floor(a[1]);
+        p.done = !!a[2];
+        if (num(a[3], 0, W) && num(a[4], 0, H) && pointInPolygon(a[3], a[4], COURSE.boundary)) {
+          p.ball.x = a[3];
+          p.ball.y = a[4];
+        }
+        return p;
+      });
+      if (players.includes(null)) return null;
+      let lastShot = null;
+      if (Array.isArray(o.l)) {
+        const [p, x, y, a, w] = o.l;
+        if ([0, 1].includes(p) && num(x, 0, W) && num(y, 0, H) && num(a, -10, 10) && num(w, 0, 1)) {
+          lastShot = { p, x, y, a, w };
+        }
+      }
+      return { id: o.i, seq: o.s, turn: o.t, starter: o.f, players, lastShot };
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function loadStore() {
+    try { return JSON.parse(localStorage.getItem('minigolf-games') || '{}') || {}; } catch (e) { return {}; }
+  }
+
+  function saveStore(store) {
+    try {
+      const ids = Object.keys(store).sort((a, b) => store[b].at - store[a].at);
+      ids.slice(30).forEach((id) => delete store[id]);
+      localStorage.setItem('minigolf-games', JSON.stringify(store));
+    } catch (e) { /* ignore */ }
+  }
+
+  function remember() {
+    const store = loadStore();
+    store[state.id] = { me: state.me, seq: state.seq, code: encodeGame(), at: Date.now() };
+    saveStore(store);
+  }
+
+  // Record a new version of the game: bump seq, save it, and put it in the address bar.
+  function commit() {
+    state.seq++;
+    remember();
+    history.replaceState(null, '', gameUrl());
+    currentCode = encodeGame();
+  }
+
+  function gameUrl() {
+    return `${location.href.split('#')[0]}#g=${encodeGame()}`;
+  }
+
+  function shareMessage() {
+    const [a, b] = state.players;
+    const score = `${nameOf(0)} ${a.strokes} · ${nameOf(1)} ${b.strokes}`;
+    if (state.players.every((p) => p.done)) {
+      if (a.strokes === b.strokes) return `We tied at mini golf! ⛳ ${score}`;
+      return `${nameOf(a.strokes < b.strokes ? 0 : 1)} wins at mini golf! ⛳ ${score}`;
+    }
+    if (!state.players[1].name) return `${nameOf(0)} challenged you to mini golf ⛳ Your turn!`;
+    return `Your turn at mini golf ⛳ ${score}`;
+  }
+
+  async function sendLink(button) {
+    const url = gameUrl();
+    const text = shareMessage();
+    if (navigator.share) {
+      try {
+        await navigator.share({ title: 'Mini Golf', text, url });
+        return;
+      } catch (e) {
+        if (e && e.name === 'AbortError') return;
+      }
+    }
+    copyLink(button);
+  }
+
+  async function copyLink(button) {
+    const url = gameUrl();
+    let ok = false;
+    try {
+      await navigator.clipboard.writeText(url);
+      ok = true;
+    } catch (e) { /* fall through */ }
+    if (ok) {
+      const old = button.textContent;
+      button.textContent = 'Link copied!';
+      setTimeout(() => { button.textContent = old; }, 1600);
+    } else {
+      window.prompt('Copy this link and send it:', url);
+    }
+  }
+
+  let currentCode = '';
+
+  // Open a game from the address bar. Returns false if there's no (valid) game in it.
+  function loadFromHash() {
+    const m = location.hash.match(/^#g=([A-Za-z0-9_-]+)$/);
+    if (!m) return false;
+    if (m[1] === currentCode) return true;
+    let g = decodeGame(m[1]);
+    if (!g) {
+      showMenu();
+      showBanner("Couldn't read that game link", '#c0392b', 2500);
+      return false;
+    }
+    const store = loadStore();
+    const saved = store[g.id];
+    let newer = false;
+    if (saved && saved.seq > g.seq) {
+      // This phone has already moved past this link (e.g. you reopened a link you already played).
+      const g2 = decodeGame(saved.code);
+      if (g2) { g = g2; newer = true; }
+    }
+    const seenBefore = saved && saved.seq >= g.seq;
+
+    state.mode = 'link';
+    state.id = g.id;
+    state.seq = g.seq;
+    state.turn = g.turn;
+    state.starter = g.starter;
+    state.players = g.players;
+    state.lastShot = g.lastShot;
+    state.roll = state.anim = state.aim = null;
+    state.me = saved ? saved.me : (!g.players[1].name ? 1 : g.turn);
+    currentCode = encodeGame();
+    if (newer) history.replaceState(null, '', gameUrl());
+
+    hideOverlays();
+    updateHud();
+    if (state.me === 1 && !state.players[1].name) {
+      state.phase = 'join';
+      showJoin();
+      return true;
+    }
+    remember();
+    if (seenBefore) routeTurn();
+    else playReplayThenRoute();
+    return true;
+  }
+
+  // Show the other player's last shot rolling, then carry on from the saved state.
+  function playReplayThenRoute() {
+    const ls = state.lastShot;
+    if (!ls || ls.p === state.me) {
+      routeTurn();
+      return;
+    }
+    // Park the ball at the shot's start (input stays blocked) while the banner shows.
+    const ball = { x: ls.x, y: ls.y, vx: 0, vy: 0 };
+    const from = { x: ls.x, y: ls.y };
+    state.phase = 'anim';
+    state.roll = {
+      ball,
+      from,
+      player: ls.p,
+      onEvent: (ev) => {
+        state.roll = null;
+        const done = () => { state.anim = null; routeTurn(); };
+        if (ev === 'sink') {
+          sound.sink();
+          showBanner(`${nameOf(ls.p)}: ${scoreName(state.players[ls.p].strokes)}`, COLORS[ls.p], 1500);
+          startAnim('sink', ball, ls.p, done);
+        } else if (ev === 'water') {
+          sound.splash();
+          showBanner(`${nameOf(ls.p)} splashed! +1`, '#3fa7e0', 1300);
+          startAnim('splash', ball, ls.p, done);
+        } else {
+          done();
+        }
+      },
+    };
+    showBanner(`${nameOf(ls.p)}'s shot`, COLORS[ls.p], 1100);
+    setTimeout(() => {
+      if (!state.roll || state.roll.ball !== ball) return; // game changed meanwhile
+      launch(ball, from, ls.w, ls.a);
+      sound.hit(ls.w);
+      state.phase = 'rolling';
+    }, 900);
   }
 
   // ---------- Input ----------
@@ -284,7 +652,7 @@
     if (!state.aim || e.pointerId !== state.aim.id) return;
     const { power, dirX, dirY } = aimVector();
     state.aim = null;
-    if (!cancelled && power >= MIN_POWER && state.phase === 'aim') shoot(power, dirX, dirY);
+    if (!cancelled && power >= MIN_POWER && state.phase === 'aim') shoot(power, Math.atan2(dirY, dirX));
   }
   canvas.addEventListener('pointerup', (e) => release(e, false));
   canvas.addEventListener('pointercancel', (e) => release(e, true));
@@ -295,17 +663,23 @@
   }, { passive: false });
   document.addEventListener('gesturestart', (e) => e.preventDefault());
 
-  document.getElementById('start-btn').addEventListener('click', () => { sound.unlock(); startGame(); });
-  document.getElementById('again-btn').addEventListener('click', () => {
-    state.starter = 1 - state.starter; // alternate who tees off first
-    startGame();
+  menu.querySelectorAll('.seg button').forEach((b) => b.addEventListener('click', () => setMenuMode(b.dataset.mode)));
+  $('start-btn').addEventListener('click', startFromMenu);
+  $('again-btn').addEventListener('click', rematch);
+  $('menu-btn').addEventListener('click', showMenu);
+  $('send-result-btn').addEventListener('click', (e) => sendLink(e.currentTarget));
+  $('share-btn').addEventListener('click', (e) => sendLink(e.currentTarget));
+  $('copy-btn').addEventListener('click', (e) => copyLink(e.currentTarget));
+  $('view-btn').addEventListener('click', showWaitBar);
+  $('resend-btn').addEventListener('click', showShare);
+  $('join-btn').addEventListener('click', join);
+  $('join-name').addEventListener('keydown', (e) => { if (e.key === 'Enter') join(); });
+  $('hole-info').addEventListener('click', () => {
+    if (state.phase === 'menu') return;
+    if (state.phase !== 'over' && !window.confirm('Leave this game and start a new one?')) return;
+    showMenu();
   });
-  document.getElementById('menu-btn').addEventListener('click', () => {
-    results.classList.add('hidden');
-    menu.classList.remove('hidden');
-    state.phase = 'menu';
-    updateHud();
-  });
+  window.addEventListener('hashchange', loadFromHash);
 
   // ---------- Physics ----------
   function inSand(b) {
@@ -372,8 +746,8 @@
     bounce(b, nx, ny);
   }
 
-  function physicsStep(dt) {
-    const b = current().ball;
+  // Advance a moving ball by one fixed step. Returns 'sink', 'water', 'stop' or null.
+  function physicsStep(b, from, dt) {
     let speed = Math.hypot(b.vx, b.vy);
 
     let decel = ROLL_FRICTION + speed * DRAG_COEF;
@@ -397,10 +771,7 @@
     const hd = Math.hypot(hx, hy);
     speed = Math.hypot(b.vx, b.vy);
     if (hd < HOLE_R) {
-      if (speed < CAPTURE_SPEED) {
-        holeOut();
-        return;
-      }
+      if (speed < CAPTURE_SPEED) return 'sink';
       const pull = 2600 * dt;
       b.vx += (hx / hd) * pull;
       b.vy += (hy / hd) * pull;
@@ -408,19 +779,20 @@
       b.vy *= 0.995;
     }
 
-    if (inWater(b)) {
-      splash();
-      return;
-    }
+    if (inWater(b)) return 'water';
 
     if (outOfBounds(b)) {
       // Safety net: should never happen, but never lose the ball.
-      b.x = state.shotFrom.x;
-      b.y = state.shotFrom.y;
+      b.x = from.x;
+      b.y = from.y;
       b.vx = b.vy = 0;
     }
 
-    if (speed < STOP_SPEED) endShot();
+    if (speed < STOP_SPEED) {
+      b.vx = b.vy = 0;
+      return 'stop';
+    }
+    return null;
   }
 
   // ---------- Rendering ----------
@@ -684,16 +1056,24 @@
     ctx.restore();
   }
 
-  function drawSplash() {
-    if (state.phase !== 'splash') return;
-    const t = state.splashT / 0.8;
-    const p = state.splashAt;
+
+  function drawAnim() {
+    const a = state.anim;
+    if (a.kind === 'sink') {
+      const t = Math.min(a.t / 0.35, 1);
+      const h = COURSE.hole;
+      const x = a.x + (h.x - a.x) * t;
+      const y = a.y + (h.y - a.y) * t;
+      drawBall(x, y, COLORS[a.player], 1 - t * 0.6, BALL_R * (1 - t * 0.5));
+      return;
+    }
+    const t = a.t / 0.8;
     ctx.save();
-    ctx.strokeStyle = `rgba(255,255,255,${1 - t})`;
+    ctx.strokeStyle = `rgba(255,255,255,${Math.max(0, 1 - t)})`;
     ctx.lineWidth = 3;
     for (let i = 0; i < 2; i++) {
       ctx.beginPath();
-      ctx.arc(p.x, p.y, 4 + (t + i * 0.3) * 22, 0, Math.PI * 2);
+      ctx.arc(a.x, a.y, 4 + (t + i * 0.3) * 22, 0, Math.PI * 2);
       ctx.stroke();
     }
     ctx.restore();
@@ -708,25 +1088,25 @@
       return;
     }
 
-    // Other players' balls are ghosts (no collisions between balls).
+    // The ball in focus is the one moving / animating, otherwise whoever's up.
+    const focus = state.roll ? state.roll.player : state.anim ? state.anim.player : state.turn;
+
+    // Other balls are ghosts (balls don't collide with each other).
     state.players.forEach((p, i) => {
-      if (i === state.turn || p.done) return;
+      if (i === focus || p.done) return;
       drawBall(p.ball.x, p.ball.y, COLORS[i], 0.45);
     });
 
-    const p = current();
-    if (state.phase === 'sinking') {
-      const t = Math.min(state.sinkT / 0.35, 1);
-      const h = COURSE.hole;
-      const x = p.ball.x + (h.x - p.ball.x) * t;
-      const y = p.ball.y + (h.y - p.ball.y) * t;
-      drawBall(x, y, COLORS[state.turn], 1 - t * 0.6, BALL_R * (1 - t * 0.5));
-    } else if (state.phase === 'splash') {
-      drawSplash();
-    } else if (!p.done) {
-      if (state.phase === 'aim' && !state.aim) drawIdleHint();
-      drawBall(p.ball.x, p.ball.y, COLORS[state.turn], 1);
-      drawAim();
+    if (state.roll) {
+      drawBall(state.roll.ball.x, state.roll.ball.y, COLORS[focus], 1);
+    } else if (state.anim) {
+      drawAnim();
+    } else if (!state.players[focus].done) {
+      const b = state.players[focus].ball;
+      const myShot = state.phase === 'aim';
+      if (myShot && !state.aim) drawIdleHint();
+      drawBall(b.x, b.y, COLORS[focus], myShot || state.phase === 'over' ? 1 : 0.75);
+      if (myShot) drawAim();
     }
 
     drawFlag();
@@ -741,23 +1121,21 @@
     last = now;
     state.time += dt;
 
-    if (state.phase === 'rolling') {
+    if (state.phase === 'rolling' && state.roll) {
       acc += dt;
-      while (acc >= STEP && state.phase === 'rolling') {
-        physicsStep(STEP);
+      while (acc >= STEP && state.roll) {
+        const r = state.roll;
+        const ev = physicsStep(r.ball, r.from, STEP);
         acc -= STEP;
+        if (ev) r.onEvent(ev);
       }
       if (state.phase !== 'rolling') acc = 0;
-    } else if (state.phase === 'sinking') {
-      state.sinkT += dt;
-      if (state.sinkT > 0.6) nextTurn();
-    } else if (state.phase === 'splash') {
-      state.splashT += dt;
-      if (state.splashT > 0.9) {
-        const b = current().ball;
-        b.x = state.shotFrom.x;
-        b.y = state.shotFrom.y;
-        endShot();
+    } else if (state.phase === 'anim' && state.anim) {
+      const a = state.anim;
+      a.t += dt;
+      if (a.t > (a.kind === 'sink' ? 0.6 : 0.9)) {
+        state.anim = null;
+        a.onDone();
       }
     }
 
@@ -816,9 +1194,12 @@
     };
   })();
 
+
   // ---------- Boot ----------
   loadNames();
+  setMenuMode('link');
   resize();
   updateHud();
+  if (!loadFromHash()) showMenu();
   requestAnimationFrame(frame);
 })();

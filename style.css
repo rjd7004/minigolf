@@ -91,6 +91,12 @@ html, body {
 
 #hole-info {
   flex: none;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 10px;
+  background: none;
+  font: inherit;
+  cursor: pointer;
   text-align: center;
   color: #fff;
   line-height: 1.15;
@@ -213,6 +219,13 @@ html, body {
   touch-action: manipulation;
 }
 .btn:active { transform: translateY(2px); box-shadow: 0 2px 0 #1f6e31; }
+.btn.secondary {
+  margin-top: 10px;
+  background: #e7efe2;
+  color: #1f6e31;
+  box-shadow: 0 4px 0 #c5d6bd;
+}
+.btn.hidden { display: none; }
 .btn.ghost {
   margin-top: 8px;
   background: transparent;
@@ -237,3 +250,69 @@ html, body {
 .result-row .score { font-weight: 800; font-variant-numeric: tabular-nums; }
 .result-row .rel { min-width: 2.6em; text-align: right; color: var(--muted); font-size: 14px; }
 .result-row.winner { background: #fff4c7; box-shadow: inset 0 0 0 2px #f2c94c; }
+
+/* ---------- Menu mode switch ---------- */
+.seg {
+  display: flex;
+  padding: 4px;
+  margin-bottom: 8px;
+  border-radius: 12px;
+  background: #e7ebe2;
+}
+.seg button {
+  flex: 1;
+  padding: 9px 6px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 15px;
+  font-weight: 700;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.seg button.on {
+  background: #fff;
+  color: var(--ink);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+}
+.help {
+  min-height: 2.8em;
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
+}
+#menu[data-mode="link"] .local-only { display: none; }
+
+/* ---------- Waiting bar (link mode, friend's turn) ---------- */
+#waitbar {
+  position: absolute;
+  left: 50%;
+  bottom: 22px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: calc(100% - 32px);
+  padding: 8px 8px 8px 16px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  font-weight: 700;
+  white-space: nowrap;
+}
+#waitbar.hidden { display: none; }
+#wait-text { overflow: hidden; text-overflow: ellipsis; }
+#resend-btn {
+  flex: none;
+  padding: 8px 14px;
+  border: 0;
+  border-radius: 999px;
+  background: #2e9b47;
+  color: #fff;
+  font: inherit;
+  font-weight: 800;
+  cursor: pointer;
+}
