@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#1f4d26">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Mini Golf</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <header id="hud">
+      <div class="player-card" data-player="0">
+        <span class="dot"></span>
+        <span class="name">Player 1</span>
+        <span class="strokes">0</span>
+      </div>
+      <div id="hole-info">
+        <div class="hole-label">Hole 1</div>
+        <div class="par-label">Par 3</div>
+      </div>
+      <div class="player-card" data-player="1">
+        <span class="strokes">0</span>
+        <span class="name">Player 2</span>
+        <span class="dot"></span>
+      </div>
+    </header>
+
+    <main id="stage">
+      <canvas id="course" aria-label="Mini golf course"></canvas>
+      <div id="banner" aria-live="polite"></div>
+    </main>
+
+    <div id="menu" class="overlay">
+      <div class="panel">
+        <h1>Mini Golf</h1>
+        <p class="sub">Drag back from anywhere to aim. Pull further for more power. Let go to putt.</p>
+        <label class="name-field p0">
+          <span class="dot"></span>
+          <input id="name0" maxlength="12" placeholder="Player 1" autocomplete="off">
+        </label>
+        <label class="name-field p1">
+          <span class="dot"></span>
+          <input id="name1" maxlength="12" placeholder="Player 2" autocomplete="off">
+        </label>
+        <button id="start-btn" class="btn">Tee off</button>
+      </div>
+    </div>
+
+    <div id="results" class="overlay hidden">
+      <div class="panel">
+        <h1 id="result-title">Game over</h1>
+        <div id="result-rows"></div>
+        <button id="again-btn" class="btn">Play again</button>
+        <button id="menu-btn" class="btn ghost">Change players</button>
+      </div>
+    </div>
+  </div>
+  <script src="game.js"></script>
+</body>
+</html>
