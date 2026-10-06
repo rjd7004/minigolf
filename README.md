@@ -37,6 +37,7 @@ On iOS, "Add to Home Screen" runs it full screen.
 
 The version shows in the bottom-right corner. It's set in `index.html`: when releasing, bump the label and every `?v=` link to the stylesheet and scripts (the `?v=` makes phones fetch the new files instead of a cached copy).
 
+- v3.1: sync server live at minigolf-sync.rjd7004.workers.dev
 - v3.0: optional sync server: turns sync automatically and push notifications when it's your turn; installable Home Screen app
 - v2.1: stronger bumpers, slopes only in corridors, no stroke limit, wins leaderboard, cup draws in slow balls on its edge
 - v2.0: five randomly generated holes per round, kicking bumpers, slopes, white walls and obstacles, scorecard
