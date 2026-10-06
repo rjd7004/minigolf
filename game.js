@@ -1,12 +1,15 @@
 (() => {
   'use strict';
 
+  const Gen = window.MiniGolfCourse;
+
   // ---------- Tuning ----------
-  // The course is laid out in a fixed 400x700 "world" and scaled to fit the screen.
-  const W = 400;
-  const H = 700;
-  const BALL_R = 8;
-  const HOLE_R = 12;
+  // Holes are laid out in a fixed 400x700 "world" and scaled to fit the screen.
+  const W = Gen.W;
+  const H = Gen.H;
+  const BALL_R = Gen.BALL_R;
+  const HOLE_R = Gen.HOLE_R;
+  const HOLES = Gen.HOLES;
   const MAX_SPEED = 950;      // world units / second at full power
   const MAX_DRAG = 150;       // drag distance (world units) for full power
   const MIN_POWER = 0.05;     // shorter drags are treated as a cancel
@@ -18,6 +21,7 @@
   const DRAG_QUAD = 0.001;    // per world unit
   const SAND_MULT = 5;
   const STOP_SPEED = 4;
+  const SLOPE_SETTLE = 0.3;   // on a slope, the ball must stay this slow this long to count as stopped
   // The cup: while the ball's centre is over it, the slope pulls the ball toward
   // the middle. Fast balls get bent around the rim and roll on; slow ones drop.
   const CAPTURE_SPEED = 290;  // max speed that drops when dead-centre; less toward the edge
@@ -28,40 +32,14 @@
   const RIM_DRAG = 0.997;     // speed kept per physics step while riding the rim
   const SINK_TIME = 0.45;     // seconds for the ball to drop out of sight
   const RESTITUTION = 0.75;
-  const MAX_STROKES = 10;
-  const PAR = 3;
+  // Bumpers fire the ball back out, adding speed like a pinball bumper.
+  const BUMPER_RESTITUTION = 0.9;
+  const BUMPER_KICK = 230;    // extra speed added away from the bumper on every hit
+  const MAX_STROKES = 10;     // per hole
+  const MAX_SHOTS_SENT = 24;  // shots carried in a link for the other phone to replay
   const STEP = 1 / 240;       // fixed physics step (small enough to avoid tunnelling)
 
   const COLORS = ['#ff5a5f', '#3b82f6'];
-
-  const COURSE = {
-    // Outer wall, clockwise. A dogleg: start bottom-left, hole top-right.
-    boundary: [[40, 660], [220, 660], [220, 420], [360, 420], [360, 60], [140, 60], [40, 160]],
-    tee: { x: 130, y: 615 },
-    hole: { x: 285, y: 125 },
-    blocks: [
-      [[150, 250], [262, 250], [262, 276], [150, 276]],
-    ],
-    bumpers: [
-      { x: 130, y: 490, r: 15 },
-      { x: 100, y: 345, r: 15 },
-      { x: 305, y: 335, r: 15 },
-    ],
-    sand: [{ x: 300, y: 215, r: 32 }],
-    water: [{ x: 58, y: 180, w: 72, h: 50 }],
-  };
-
-  // Precompute wall segments from the outer boundary and the blocks.
-  const segments = [];
-  function addPolygon(poly) {
-    for (let i = 0; i < poly.length; i++) {
-      const a = poly[i];
-      const b = poly[(i + 1) % poly.length];
-      segments.push({ ax: a[0], ay: a[1], bx: b[0], by: b[1] });
-    }
-  }
-  addPolygon(COURSE.boundary);
-  COURSE.blocks.forEach(addPolygon);
 
   // ---------- DOM ----------
   const $ = (id) => document.getElementById(id);
@@ -84,10 +62,17 @@
     id: '',         // game id (link mode)
     seq: 0,         // bumps on every committed change so stale links can be detected
     me: 0,          // which player this device is (link mode)
+    seed: 0,        // the 5 holes are generated from this
+    holes: [],      // generated holes for this round
+    hole: 0,        // index of the hole being played
+    view: 0,        // index of the hole on screen (differs while replaying an earlier hole)
+    holeStarter: 0, // who teed off the current hole (keeps the honour on a tied hole)
     players: [makePlayer('Player 1'), makePlayer('Player 2')],
     turn: 0,
-    starter: 0,
-    lastShot: null, // { p, x, y, a, w }: the most recent shot, replayed for the other player
+    starter: 0,     // who teed off hole 1 (alternates on rematch)
+    replayQueue: [], // the other player's shots waiting to be replayed here
+    shots: [],      // my shots since the turn came to me (link mode): [{ p, h, x, y, a, w }]
+    introPending: false, // show the "Hole N · Par P" banner before the next turn
     roll: null,     // { ball, from, player, onEvent } while a ball is moving
     anim: null,     // { kind: 'sink' | 'splash', t, x, y, player, onDone }
     aim: null,      // { sx, sy, cx, cy } in world coords while dragging
@@ -95,7 +80,11 @@
   };
 
   function makePlayer(name) {
-    return { name, strokes: 0, done: false, ball: { x: COURSE.tee.x, y: COURSE.tee.y, vx: 0, vy: 0 } };
+    return { name, scores: [], strokes: 0, done: false, ball: { x: 0, y: 0, vx: 0, vy: 0 } };
+  }
+
+  function course() {
+    return state.holes[state.view];
   }
 
   function current() {
@@ -108,6 +97,27 @@
 
   function isLink() {
     return state.mode === 'link';
+  }
+
+  function total(p) {
+    return p.scores.reduce((a, b) => a + b, 0) + (p.scores.length > state.hole ? 0 : p.strokes);
+  }
+
+  function roundOver() {
+    return state.players.every((p) => p.scores.length === HOLES);
+  }
+
+  function toTee(p) {
+    const t = state.holes[state.hole].tee;
+    p.ball.x = t.x;
+    p.ball.y = t.y;
+    p.ball.vx = p.ball.vy = 0;
+  }
+
+  let roundCache = { seed: null, holes: null };
+  function holesFor(seed) {
+    if (roundCache.seed !== seed) roundCache = { seed, holes: Gen.generateRound(seed) };
+    return roundCache.holes;
   }
 
   // ---------- Layout ----------
@@ -153,10 +163,14 @@
     state.id = mode === 'link' ? randomId() : '';
     state.seq = 0;
     state.me = me;
+    state.seed = randomSeed();
+    state.holes = holesFor(state.seed);
+    state.hole = state.view = 0;
     state.players = names.map(makePlayer);
-    state.turn = starter;
-    state.starter = starter;
-    state.lastShot = null;
+    state.players.forEach(toTee);
+    state.turn = state.starter = state.holeStarter = starter;
+    state.shots = [];
+    state.introPending = true;
     state.roll = state.anim = state.aim = null;
     hideOverlays();
     if (isLink()) commit();
@@ -190,6 +204,12 @@
     return [...a].map((b) => b.toString(36).padStart(2, '0')).join('').slice(0, 10);
   }
 
+  function randomSeed() {
+    const a = new Uint32Array(1);
+    crypto.getRandomValues(a);
+    return a[0];
+  }
+
   // ---------- Turn flow ----------
   function shoot(power, angle) {
     const p = current();
@@ -198,7 +218,10 @@
     angle = Math.round(angle * 1e4) / 1e4;
     p.strokes++;
     const from = { x: p.ball.x, y: p.ball.y };
-    state.lastShot = { p: state.turn, x: from.x, y: from.y, a: angle, w: power };
+    if (isLink()) {
+      state.shots.push({ p: state.turn, h: state.hole, x: from.x, y: from.y, a: angle, w: power });
+      if (state.shots.length > MAX_SHOTS_SENT) state.shots.shift();
+    }
     launch(p.ball, from, power, angle);
     state.roll = { ball: p.ball, from, player: state.turn, onEvent: resolveShot };
     state.phase = 'rolling';
@@ -208,6 +231,7 @@
 
   function launch(ball, from, power, angle) {
     ball.onRim = false;
+    ball.slowT = 0;
     ball.x = from.x;
     ball.y = from.y;
     ball.vx = Math.cos(angle) * power * MAX_SPEED;
@@ -249,16 +273,39 @@
       p.done = true;
       showBanner(`${nameOf(state.turn)}: max ${MAX_STROKES} strokes`, COLORS[state.turn]);
     }
-    const other = 1 - state.turn;
-    if (!state.players[other].done) state.turn = other;
+    if (state.players.every((q) => q.done)) {
+      finishHole();
+    } else {
+      const other = 1 - state.turn;
+      if (!state.players[other].done) state.turn = other;
+    }
     if (isLink()) commit();
     routeTurn();
   }
 
+  // Both players are in: record the hole and set up the next one.
+  function finishHole() {
+    const [a, b] = state.players;
+    state.players.forEach((p) => p.scores.push(p.strokes));
+    if (state.hole === HOLES - 1) return; // round over
+    // Honours: whoever won the hole tees off next; a tie keeps the same order.
+    if (a.strokes !== b.strokes) state.holeStarter = a.strokes < b.strokes ? 0 : 1;
+    state.hole++;
+    state.view = state.hole;
+    state.players.forEach((p) => {
+      p.strokes = 0;
+      p.done = false;
+      toTee(p);
+    });
+    state.turn = state.holeStarter;
+    state.introPending = true;
+  }
+
   // Decide what happens next: game over, my shot, or hand the turn to my friend.
   function routeTurn() {
+    state.view = state.hole;
     updateHud();
-    if (state.players.every((p) => p.done)) {
+    if (roundOver()) {
       state.phase = 'over';
       setTimeout(showResults, 900);
       return;
@@ -267,12 +314,19 @@
       state.phase = 'aim';
       const i = state.turn;
       const text = isLink() ? 'Your turn' : `${nameOf(i)}'s turn`;
-      const wait = Math.max(250, bannerEnd - performance.now());
+      let wait = Math.max(250, bannerEnd - performance.now());
+      if (state.introPending) {
+        state.introPending = false;
+        const c = course();
+        setTimeout(() => showBanner(`Hole ${state.hole + 1} · Par ${c.par}`, '#1d2a1f', 1400), wait);
+        wait += 1500;
+      }
       setTimeout(() => {
         if (state.phase === 'aim' && state.turn === i) showBanner(text, COLORS[i]);
       }, wait);
       return;
     }
+    state.introPending = false;
     state.phase = 'share';
     setTimeout(() => { if (state.phase === 'share') showShare(); }, 700);
   }
@@ -285,7 +339,7 @@
   function scoreName(strokes) {
     if (strokes === 1) return 'Hole in one!';
     const names = { '-3': 'Albatross!', '-2': 'Eagle!', '-1': 'Birdie!', '0': 'Par', '1': 'Bogey', '2': 'Double bogey' };
-    return names[strokes - PAR] || `${strokes} strokes`;
+    return names[strokes - course().par] || `${strokes} strokes`;
   }
 
   // ---------- Panels ----------
@@ -308,29 +362,56 @@
     $('start-btn').textContent = mode === 'local' ? 'Tee off' : 'Start & take first shot';
     nameInputs[0].placeholder = mode === 'local' ? 'Player 1' : 'Your name';
     $('mode-help').textContent = mode === 'local'
-      ? 'Two players, one phone. Pass it back and forth.'
-      : "You take a shot, then text your friend a link. They play their shot on their phone and send one back.";
+      ? 'Two players, one phone. Pass it back and forth. 5 new holes every round.'
+      : 'You take a shot, then text your friend a link. They play their shot on their phone and send one back. 5 new holes every round.';
+  }
+
+  function relPar(n) {
+    return n === 0 ? 'E' : (n > 0 ? `+${n}` : `${n}`);
   }
 
   function showResults() {
     hideOverlays();
-    const [a, b] = state.players;
-    const winner = a.strokes === b.strokes ? -1 : (a.strokes < b.strokes ? 0 : 1);
+    const totals = state.players.map(total);
+    const winner = totals[0] === totals[1] ? -1 : (totals[0] < totals[1] ? 0 : 1);
     let title = winner < 0 ? "It's a tie!" : `${nameOf(winner)} wins!`;
     if (isLink() && winner >= 0) title = winner === state.me ? 'You win!' : `${nameOf(winner)} wins!`;
     $('result-title').textContent = title;
+    const parTotal = state.holes.reduce((a, h) => a + h.par, 0);
+
+    // Scorecard: one column per hole, then the total.
+    const table = document.createElement('table');
+    table.className = 'scorecard';
+    const head = table.insertRow();
+    head.insertCell().textContent = '';
+    state.holes.forEach((h, i) => { head.insertCell().textContent = i + 1; });
+    head.insertCell().textContent = 'Tot';
+    const parRow = table.insertRow();
+    parRow.className = 'par';
+    parRow.insertCell().textContent = 'Par';
+    state.holes.forEach((h) => { parRow.insertCell().textContent = h.par; });
+    parRow.insertCell().textContent = parTotal;
+    state.players.forEach((p, i) => {
+      const row = table.insertRow();
+      row.className = `p${i}` + (i === winner ? ' winner' : '');
+      const name = row.insertCell();
+      name.innerHTML = '<span class="dot"></span><span class="name"></span>';
+      name.querySelector('.name').textContent = nameOf(i);
+      p.scores.forEach((s, h) => {
+        const cell = row.insertCell();
+        cell.textContent = s;
+        const rel = s - state.holes[h].par;
+        if (rel < 0) cell.className = 'under';
+        else if (rel > 0) cell.className = 'over';
+      });
+      const tot = row.insertCell();
+      tot.className = 'tot';
+      tot.innerHTML = `${totals[i]}<small>${relPar(totals[i] - parTotal)}</small>`;
+    });
     const rows = $('result-rows');
     rows.innerHTML = '';
-    state.players.forEach((p, i) => {
-      const row = document.createElement('div');
-      row.className = `result-row p${i}` + (i === winner ? ' winner' : '');
-      const rel = p.strokes - PAR;
-      row.innerHTML = '<span class="dot"></span><span class="name"></span><span class="score"></span><span class="rel"></span>';
-      row.querySelector('.name').textContent = nameOf(i);
-      row.querySelector('.score').textContent = p.strokes;
-      row.querySelector('.rel').textContent = rel === 0 ? 'E' : (rel > 0 ? `+${rel}` : `${rel}`);
-      rows.appendChild(row);
-    });
+    rows.appendChild(table);
+
     const send = $('send-result-btn');
     send.classList.toggle('hidden', !isLink());
     send.textContent = `Send result to ${nameOf(1 - state.me)}`;
@@ -345,8 +426,8 @@
     const joined = !!state.players[1].name;
     const friend = joined ? nameOf(state.turn) : 'your friend';
     $('share-title').textContent = joined ? `${friend}'s turn` : 'Challenge a friend';
-    $('share-text').textContent = state.lastShot
-      ? `Send ${friend} the link. They'll watch your shot, then take theirs.`
+    $('share-text').textContent = state.shots.length
+      ? `Send ${friend} the link. They'll watch your shot${state.shots.length > 1 ? 's' : ''}, then take theirs.`
       : `Send ${friend} the link so they can tee off.`;
     $('share-btn').textContent = joined ? `Send to ${friend}` : 'Send link';
     $('copy-btn').textContent = 'Copy link';
@@ -364,9 +445,9 @@
     hideOverlays();
     const host = nameOf(0);
     $('join-title').textContent = `${host} challenged you!`;
-    $('join-text').textContent = state.lastShot
-      ? `Enter your name, watch ${host}'s first shot, then take yours.`
-      : 'Enter your name to tee off.';
+    $('join-text').textContent = state.replayQueue && state.replayQueue.length
+      ? `5 holes. Enter your name, watch ${host}'s first shot, then take yours.`
+      : '5 holes. Enter your name to tee off.';
     const saved = nameInputs[0].value.trim();
     $('join-name').value = saved && saved !== host ? saved : '';
     joinPanel.classList.remove('hidden');
@@ -380,20 +461,27 @@
     nameInputs[0].value = name;
     commit();
     hideOverlays();
-    playReplayThenRoute();
+    playReplaysThenRoute();
   }
 
   function updateHud() {
+    const inGame = state.phase !== 'menu';
     state.players.forEach((p, i) => {
       const card = cards[i];
       let name = nameOf(i);
-      if (isLink() && state.phase !== 'menu' && i === state.me) name += ' (you)';
+      if (isLink() && inGame && i === state.me) name += ' (you)';
       card.querySelector('.name').textContent = name;
-      card.querySelector('.strokes').textContent = p.strokes;
-      const active = state.phase !== 'menu' && state.phase !== 'over' && i === state.turn && !p.done;
+      // While an earlier hole is being replayed, the live numbers would spoil it.
+      const showing = state.view === state.hole;
+      card.querySelector('.strokes').textContent = inGame && showing ? p.strokes : (inGame ? '–' : 0);
+      card.querySelector('.total').textContent = inGame ? `Total ${total(p)}` : '';
+      const active = inGame && state.phase !== 'over' && showing && i === state.turn && !p.done;
       card.classList.toggle('active', active);
-      card.classList.toggle('done', p.done);
+      card.classList.toggle('done', inGame && showing && p.done);
     });
+    const c = course();
+    $('hole-label').textContent = inGame ? `Hole ${state.view + 1}/${HOLES}` : `${HOLES} holes`;
+    $('par-label').textContent = inGame && c ? `Par ${c.par}` : 'Mini Golf';
   }
 
   let bannerTimer = 0;
@@ -409,8 +497,9 @@
 
   // ---------- Sharing turns as links ----------
   // The whole game lives in the URL fragment (#g=...), so no server is needed.
-  // Each phone also remembers the newest state it has seen per game, so reopening
-  // an old link can't be used to retake a shot.
+  // The 5 holes aren't in the link: both phones rebuild them from the seed.
+  // Each phone also remembers the newest state it has seen per game, so
+  // reopening an old link can't be used to retake a shot.
 
   function b64urlEncode(str) {
     const bytes = new TextEncoder().encode(str);
@@ -425,45 +514,65 @@
   }
 
   function encodeGame() {
-    const ls = state.lastShot;
     return b64urlEncode(JSON.stringify({
-      v: 1,
+      v: 2,
       i: state.id,
       s: state.seq,
+      k: state.seed,
+      h: state.hole,
+      o: state.holeStarter,
       t: state.turn,
       f: state.starter,
-      p: state.players.map((p) => [p.name, p.strokes, p.done ? 1 : 0, p.ball.x, p.ball.y]),
-      l: ls ? [ls.p, ls.x, ls.y, ls.a, ls.w] : 0,
+      p: state.players.map((p) => [p.name, p.scores, p.strokes, p.done ? 1 : 0, p.ball.x, p.ball.y]),
+      l: state.shots.map((s) => [s.p, s.h, s.x, s.y, s.a, s.w]),
     }));
   }
 
+  // Returns the decoded game, null if it's garbage, or 'old' for a v1 (single hole) link.
   function decodeGame(code) {
     try {
       const o = JSON.parse(b64urlDecode(code));
+      if (o && o.v === 1) return 'old';
       const num = (n, lo, hi) => typeof n === 'number' && Number.isFinite(n) && n >= lo && n <= hi;
-      if (o.v !== 1 || typeof o.i !== 'string' || !/^[a-z0-9]{1,16}$/.test(o.i)) return null;
-      if (!num(o.s, 0, 1e6) || ![0, 1].includes(o.t) || ![0, 1].includes(o.f)) return null;
+      const int = (n, lo, hi) => Number.isInteger(n) && n >= lo && n <= hi;
+      const bit = (n) => n === 0 || n === 1;
+      if (o.v !== 2 || typeof o.i !== 'string' || !/^[a-z0-9]{1,16}$/.test(o.i)) return null;
+      if (!int(o.s, 0, 1e6) || !int(o.k, 0, 4294967295) || !int(o.h, 0, HOLES - 1)) return null;
+      if (!bit(o.o) || !bit(o.t) || !bit(o.f)) return null;
       if (!Array.isArray(o.p) || o.p.length !== 2) return null;
+      const holes = holesFor(o.k);
       const players = o.p.map((a) => {
-        if (!Array.isArray(a) || typeof a[0] !== 'string' || !num(a[1], 0, 30)) return null;
+        if (!Array.isArray(a) || typeof a[0] !== 'string' || !Array.isArray(a[1])) return null;
+        const scores = a[1];
+        const n = scores.length;
+        if (!(n === o.h || (o.h === HOLES - 1 && n === HOLES)) || !scores.every((s) => int(s, 1, 30))) return null;
+        if (!int(a[2], 0, 30)) return null;
         const p = makePlayer(a[0].slice(0, 12));
-        p.strokes = Math.floor(a[1]);
-        p.done = !!a[2];
-        if (num(a[3], 0, W) && num(a[4], 0, H) && pointInPolygon(a[3], a[4], COURSE.boundary)) {
-          p.ball.x = a[3];
-          p.ball.y = a[4];
+        p.scores = scores;
+        p.strokes = a[2];
+        p.done = !!a[3];
+        const c = holes[o.h];
+        if (num(a[4], 0, W) && num(a[5], 0, H) && Gen.inFairway(c, a[4], a[5])) {
+          p.ball.x = a[4];
+          p.ball.y = a[5];
+        } else {
+          p.ball.x = c.tee.x;
+          p.ball.y = c.tee.y;
         }
         return p;
       });
       if (players.includes(null)) return null;
-      let lastShot = null;
+      const shots = [];
       if (Array.isArray(o.l)) {
-        const [p, x, y, a, w] = o.l;
-        if ([0, 1].includes(p) && num(x, 0, W) && num(y, 0, H) && num(a, -10, 10) && num(w, 0, 1)) {
-          lastShot = { p, x, y, a, w };
+        for (const s of o.l.slice(-MAX_SHOTS_SENT)) {
+          if (!Array.isArray(s)) continue;
+          const [p, h, x, y, a, w] = s;
+          if (bit(p) && int(h, 0, o.h) && num(x, 0, W) && num(y, 0, H) && num(a, -10, 10) && num(w, 0, 1)) {
+            shots.push({ p, h, x, y, a, w });
+          }
         }
       }
-      return { id: o.i, seq: o.s, turn: o.t, starter: o.f, players, lastShot };
+      return { id: o.i, seq: o.s, seed: o.k, hole: o.h, holeStarter: o.o, turn: o.t, starter: o.f, players, shots };
     } catch (e) {
       return null;
     }
@@ -501,13 +610,13 @@
 
   function shareMessage() {
     const [a, b] = state.players;
-    const score = `${nameOf(0)} ${a.strokes} · ${nameOf(1)} ${b.strokes}`;
-    if (state.players.every((p) => p.done)) {
-      if (a.strokes === b.strokes) return `We tied at mini golf! ⛳ ${score}`;
-      return `${nameOf(a.strokes < b.strokes ? 0 : 1)} wins at mini golf! ⛳ ${score}`;
+    const score = `${nameOf(0)} ${total(a)} · ${nameOf(1)} ${total(b)}`;
+    if (roundOver()) {
+      if (total(a) === total(b)) return `We tied at mini golf! ⛳ ${score}`;
+      return `${nameOf(total(a) < total(b) ? 0 : 1)} wins at mini golf! ⛳ ${score}`;
     }
-    if (!state.players[1].name) return `${nameOf(0)} challenged you to mini golf ⛳ Your turn!`;
-    return `Your turn at mini golf ⛳ ${score}`;
+    if (!state.players[1].name) return `${nameOf(0)} challenged you to 5 holes of mini golf ⛳ Your turn!`;
+    return `Your turn at mini golf ⛳ Hole ${state.hole + 1}/${HOLES} · ${score}`;
   }
 
   async function sendLink(button) {
@@ -548,9 +657,9 @@
     if (!m) return false;
     if (m[1] === currentCode) return true;
     let g = decodeGame(m[1]);
-    if (!g) {
+    if (!g || g === 'old') {
       showMenu();
-      showBanner("Couldn't read that game link", '#c0392b', 2500);
+      showBanner(g === 'old' ? 'That link is from an older version. Start a new game!' : "Couldn't read that game link", '#c0392b', 3000);
       return false;
     }
     const store = loadStore();
@@ -559,19 +668,26 @@
     if (saved && saved.seq > g.seq) {
       // This phone has already moved past this link (e.g. you reopened a link you already played).
       const g2 = decodeGame(saved.code);
-      if (g2) { g = g2; newer = true; }
+      if (g2 && g2 !== 'old') { g = g2; newer = true; }
     }
     const seenBefore = saved && saved.seq >= g.seq;
 
     state.mode = 'link';
     state.id = g.id;
     state.seq = g.seq;
+    state.seed = g.seed;
+    state.holes = holesFor(g.seed);
+    state.hole = state.view = g.hole;
+    state.holeStarter = g.holeStarter;
     state.turn = g.turn;
     state.starter = g.starter;
     state.players = g.players;
-    state.lastShot = g.lastShot;
     state.roll = state.anim = state.aim = null;
     state.me = saved ? saved.me : (!g.players[1].name ? 1 : g.turn);
+    // Shots by the other player get replayed here; my own stay queued for the next link.
+    state.shots = g.shots.filter((s) => s.p === state.me);
+    state.replayQueue = seenBefore ? [] : g.shots.filter((s) => s.p !== state.me);
+    state.introPending = false;
     currentCode = encodeGame();
     if (newer) history.replaceState(null, '', gameUrl());
 
@@ -583,49 +699,68 @@
       return true;
     }
     remember();
-    if (seenBefore) routeTurn();
-    else playReplayThenRoute();
+    playReplaysThenRoute();
     return true;
   }
 
-  // Show the other player's last shot rolling, then carry on from the saved state.
-  function playReplayThenRoute() {
-    const ls = state.lastShot;
-    if (!ls || ls.p === state.me) {
-      routeTurn();
-      return;
-    }
+  // Show the other player's shots rolling (switching to earlier holes if
+  // needed), then carry on from the saved state.
+  function playReplaysThenRoute() {
+    const queue = state.replayQueue || [];
+    state.replayQueue = [];
+    // If any of the shots were on an earlier hole, announce the new hole afterwards.
+    const crossed = queue.some((s) => s.h !== state.hole);
+    const next = () => {
+      const shot = queue.shift();
+      if (!shot) {
+        state.view = state.hole;
+        state.anim = null;
+        if (crossed) state.introPending = true;
+        routeTurn();
+        return;
+      }
+      replayShot(shot, next);
+    };
+    next();
+  }
+
+  function replayShot(shot, onDone) {
+    const changedHole = state.view !== shot.h;
+    state.view = shot.h;
+    updateHud();
     // Park the ball at the shot's start (input stays blocked) while the banner shows.
-    const ball = { x: ls.x, y: ls.y, vx: 0, vy: 0 };
-    const from = { x: ls.x, y: ls.y };
+    const ball = { x: shot.x, y: shot.y, vx: 0, vy: 0 };
+    const from = { x: shot.x, y: shot.y };
     state.phase = 'anim';
+    state.anim = null;
     state.roll = {
       ball,
       from,
-      player: ls.p,
+      player: shot.p,
       onEvent: (ev) => {
         state.roll = null;
-        const done = () => { state.anim = null; routeTurn(); };
+        const done = () => { state.anim = null; onDone(); };
         if (ev === 'sink') {
           sound.sink();
-          showBanner(`${nameOf(ls.p)}: ${scoreName(state.players[ls.p].strokes)}`, COLORS[ls.p], 1500);
-          startAnim('sink', ball, ls.p, done);
+          showBanner(`${nameOf(shot.p)} holed out!`, COLORS[shot.p], 1300);
+          startAnim('sink', ball, shot.p, done);
         } else if (ev === 'water') {
           sound.splash();
-          showBanner(`${nameOf(ls.p)} splashed! +1`, '#3fa7e0', 1300);
-          startAnim('splash', ball, ls.p, done);
+          showBanner(`${nameOf(shot.p)} splashed! +1`, '#3fa7e0', 1300);
+          startAnim('splash', ball, shot.p, done);
         } else {
-          done();
+          setTimeout(done, 350);
         }
       },
     };
-    showBanner(`${nameOf(ls.p)}'s shot`, COLORS[ls.p], 1100);
+    const label = changedHole ? `Hole ${shot.h + 1}: ${nameOf(shot.p)}'s shot` : `${nameOf(shot.p)}'s shot`;
+    showBanner(label, COLORS[shot.p], 1000);
     setTimeout(() => {
       if (!state.roll || state.roll.ball !== ball) return; // game changed meanwhile
-      launch(ball, from, ls.w, ls.a);
-      sound.hit(ls.w);
+      launch(ball, from, shot.w, shot.a);
+      sound.hit(shot.w);
       state.phase = 'rolling';
-    }, 900);
+    }, changedHole ? 1100 : 800);
   }
 
   // ---------- Input ----------
@@ -694,27 +829,18 @@
   });
   window.addEventListener('hashchange', loadFromHash);
 
+
   // ---------- Physics ----------
-  function inSand(b) {
-    return COURSE.sand.some((s) => Math.hypot(b.x - s.x, b.y - s.y) < s.r);
+  function inSand(c, b) {
+    return c.sand.some((s) => (b.x - s.x) * (b.x - s.x) + (b.y - s.y) * (b.y - s.y) < s.r * s.r);
   }
 
-  function inWater(b) {
-    return COURSE.water.some((w) => b.x > w.x && b.x < w.x + w.w && b.y > w.y && b.y < w.y + w.h);
+  function inWater(c, b) {
+    return c.water.some((w) => b.x > w.x && b.x < w.x + w.w && b.y > w.y && b.y < w.y + w.h);
   }
 
-  function pointInPolygon(x, y, poly) {
-    let inside = false;
-    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-      const [xi, yi] = poly[i];
-      const [xj, yj] = poly[j];
-      if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
-    }
-    return inside;
-  }
-
-  function outOfBounds(b) {
-    return !pointInPolygon(b.x, b.y, COURSE.boundary) || COURSE.blocks.some((p) => pointInPolygon(b.x, b.y, p));
+  function outOfBounds(c, b) {
+    return !Gen.inFairway(c, b.x, b.y) || c.solids.some((s) => Gen.pointInPolygon(b.x, b.y, s.pts));
   }
 
   let lastWallSound = 0;
@@ -746,6 +872,7 @@
     bounce(b, nx, ny);
   }
 
+  // Bumpers kick the ball back out faster than it came in.
   function collideBumper(b, c) {
     const dx = b.x - c.x;
     const dy = b.y - c.y;
@@ -756,15 +883,32 @@
     const ny = dy / d;
     b.x = c.x + nx * min;
     b.y = c.y + ny * min;
-    bounce(b, nx, ny);
+    const vn = b.vx * nx + b.vy * ny;
+    if (vn >= 0) return;
+    const out = -vn * BUMPER_RESTITUTION + BUMPER_KICK;
+    b.vx += (out - vn) * nx;
+    b.vy += (out - vn) * ny;
+    c.hitAt = state.time;
+    sound.bump();
   }
 
   // Advance a moving ball by one fixed step. Returns 'sink', 'water', 'stop' or null.
   function physicsStep(b, from, dt) {
-    let speed = Math.hypot(b.vx, b.vy);
+    const c = course();
 
+    // Slopes push the ball downhill.
+    let onSlope = false;
+    for (const s of c.slopes) {
+      if (b.x >= s.x && b.x < s.x + s.w && b.y >= s.y && b.y < s.y + s.h) {
+        b.vx += s.dx * s.a * dt;
+        b.vy += s.dy * s.a * dt;
+        onSlope = true;
+      }
+    }
+
+    let speed = Math.hypot(b.vx, b.vy);
     let decel = ROLL_FRICTION + speed * DRAG_COEF + speed * speed * DRAG_QUAD;
-    if (inSand(b)) decel *= SAND_MULT;
+    if (inSand(c, b)) decel *= SAND_MULT;
     const newSpeed = Math.max(0, speed - decel * dt);
     if (speed > 0) {
       const k = newSpeed / speed;
@@ -775,14 +919,14 @@
     b.x += b.vx * dt;
     b.y += b.vy * dt;
 
-    for (const s of segments) collideSegment(b, s);
-    for (const c of COURSE.bumpers) collideBumper(b, c);
+    for (const s of c.segments) collideSegment(b, s);
+    for (const bump of c.bumpers) collideBumper(b, bump);
 
     // Hole: slower than the capture speed for how far off-centre it is and it
     // drops. Otherwise the lip bends its path toward the cup (without adding
     // speed) and it rolls back out on a new line, like a ball riding a rim.
-    const hx = COURSE.hole.x - b.x;
-    const hy = COURSE.hole.y - b.y;
+    const hx = c.hole.x - b.x;
+    const hy = c.hole.y - b.y;
     const hd = Math.hypot(hx, hy);
     speed = Math.hypot(b.vx, b.vy);
     const capture = CAPTURE_SPEED * (CAPTURE_EDGE + (1 - CAPTURE_EDGE) * (1 - hd / HOLE_R));
@@ -793,10 +937,10 @@
       // the cup can't steer a dribbling ball straight into the middle.
       const turn = Math.min(RIM_TURN, RIM_PULL / speed) * dt;
       const side = Math.sign(b.vx * hy - b.vy * hx); // which way the centre is
-      const c = Math.cos(turn * side);
-      const s = Math.sin(turn * side);
-      const vx = b.vx * c - b.vy * s;
-      const vy = b.vx * s + b.vy * c;
+      const co = Math.cos(turn * side);
+      const si = Math.sin(turn * side);
+      const vx = b.vx * co - b.vy * si;
+      const vy = b.vx * si + b.vy * co;
       b.vx = vx * RIM_DRAG;
       b.vy = vy * RIM_DRAG;
       if (!b.onRim) {
@@ -807,9 +951,9 @@
       b.onRim = false;
     }
 
-    if (inWater(b)) return 'water';
+    if (inWater(c, b)) return 'water';
 
-    if (outOfBounds(b)) {
+    if (outOfBounds(c, b)) {
       // Safety net: should never happen, but never lose the ball.
       b.x = from.x;
       b.y = from.y;
@@ -817,8 +961,15 @@
     }
 
     if (speed < STOP_SPEED) {
-      b.vx = b.vy = 0;
-      return 'stop';
+      // On a slope the ball only counts as stopped once it's settled (e.g.
+      // against a wall), not at the top of its roll back down.
+      b.slowT = (b.slowT || 0) + dt;
+      if (!onSlope || b.slowT > SLOPE_SETTLE) {
+        b.vx = b.vy = 0;
+        return 'stop';
+      }
+    } else {
+      b.slowT = 0;
     }
     return null;
   }
@@ -840,7 +991,101 @@
     ctx.closePath();
   }
 
+
+  function strokeSegments(segs) {
+    ctx.beginPath();
+    for (const s of segs) {
+      ctx.moveTo(s.ax, s.ay);
+      ctx.lineTo(s.bx, s.by);
+    }
+    ctx.stroke();
+  }
+
+  function traceCells(cells) {
+    ctx.beginPath();
+    // Overlap cells by a hair so there are no seams between them.
+    for (const r of cells) ctx.rect(r.x - 0.5, r.y - 0.5, r.w + 1, r.h + 1);
+  }
+
+  // A slope: shaded light (high side) to dark (low side), with chevrons that
+  // point downhill and drift slowly that way.
+  function drawSlope(s) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(s.x, s.y, s.w, s.h);
+    ctx.clip();
+    const cx = s.x + s.w / 2;
+    const cy = s.y + s.h / 2;
+    const half = Math.abs(s.dx) ? s.w / 2 : s.h / 2;
+    const g = ctx.createLinearGradient(cx - s.dx * half, cy - s.dy * half, cx + s.dx * half, cy + s.dy * half);
+    const k = (s.a - 150) / 150; // steeper slopes are shaded harder
+    g.addColorStop(0, `rgba(255,255,255,${0.22 + 0.1 * k})`);
+    g.addColorStop(1, `rgba(0,40,10,${0.34 + 0.14 * k})`);
+    ctx.fillStyle = g;
+    ctx.fillRect(s.x, s.y, s.w, s.h);
+
+    // Chevrons, pointing downhill.
+    const along = Math.abs(s.dx) ? s.w : s.h;
+    const gap = 26;
+    const drift = (state.time * s.a * 0.12) % gap;
+    ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+    ctx.lineWidth = 3.5;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    const px = -s.dy;
+    const py = s.dx;
+    for (let d = -along / 2 - gap + drift; d < along / 2 + gap; d += gap) {
+      for (const off of [-16, 16]) {
+        const tipX = cx + s.dx * (d + 5) + px * off;
+        const tipY = cy + s.dy * (d + 5) + py * off;
+        ctx.beginPath();
+        ctx.moveTo(tipX - s.dx * 8 + px * 9, tipY - s.dy * 8 + py * 9);
+        ctx.lineTo(tipX, tipY);
+        ctx.lineTo(tipX - s.dx * 8 - px * 9, tipY - s.dy * 8 - py * 9);
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+
+  function drawBumper(b) {
+    const since = b.hitAt === undefined ? 1 : state.time - b.hitAt;
+    const pop = since < 0.15 ? 1 + 0.18 * (1 - since / 0.15) : 1;
+    const r = b.r * pop;
+    ctx.beginPath();
+    ctx.arc(b.x, b.y + 3, b.r, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, r, 0, Math.PI * 2);
+    ctx.fillStyle = since < 0.15 ? '#fff3a6' : '#f5cd2f';
+    ctx.fill();
+    ctx.lineWidth = 2.5;
+    ctx.strokeStyle = '#c99a1a';
+    ctx.stroke();
+    // Little arrows pointing outward: "this pushes you away".
+    ctx.fillStyle = '#8a6a0e';
+    for (let i = 0; i < 8; i++) {
+      const ang = (i * Math.PI) / 4;
+      const ux = Math.cos(ang);
+      const uy = Math.sin(ang);
+      const tip = r * 0.78;
+      const base = r * 0.45;
+      ctx.beginPath();
+      ctx.moveTo(b.x + ux * tip, b.y + uy * tip);
+      ctx.lineTo(b.x + ux * base - uy * 3, b.y + uy * base + ux * 3);
+      ctx.lineTo(b.x + ux * base + uy * 3, b.y + uy * base - ux * 3);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, r * 0.16, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
   function drawCourse() {
+    const c = course();
+
     // Rough
     ctx.fillStyle = '#2f6e36';
     ctx.fillRect(0, 0, W, H);
@@ -848,24 +1093,28 @@
     for (let y = 0; y < H; y += 22) {
       for (let x = (y / 22) % 2 ? 11 : 0; x < W; x += 22) ctx.fillRect(x, y, 3, 3);
     }
+    if (!c) return;
 
-    // Wall: stroke wide, then fill the fairway over it so only the outer half shows.
-    tracePoly(COURSE.boundary);
-    ctx.lineJoin = 'round';
-    ctx.lineWidth = 22;
-    ctx.strokeStyle = '#6b4423';
-    ctx.stroke();
-    ctx.lineWidth = 16;
-    ctx.strokeStyle = '#a06a3a';
-    ctx.stroke();
+    // Walls: a drop shadow, then a thick white stroke along every wall. The
+    // fairway is filled over it afterwards so only the outer half shows.
+    ctx.lineCap = 'square';
+    ctx.save();
+    ctx.translate(0, 3);
+    ctx.lineWidth = 12;
+    ctx.strokeStyle = 'rgba(0,0,0,0.28)';
+    strokeSegments(c.walls);
+    ctx.restore();
+    ctx.lineWidth = 12;
+    ctx.strokeStyle = '#ffffff';
+    strokeSegments(c.walls);
 
     // Fairway with mowing stripes
     ctx.save();
-    tracePoly(COURSE.boundary);
-    ctx.fillStyle = '#5cc04f';
+    traceCells(c.cells);
+    ctx.fillStyle = '#4fb046';
     ctx.fill();
     ctx.clip();
-    ctx.fillStyle = 'rgba(255,255,255,0.07)';
+    ctx.fillStyle = 'rgba(255,255,255,0.06)';
     for (let i = -H; i < W + H; i += 56) {
       ctx.beginPath();
       ctx.moveTo(i, 0);
@@ -875,20 +1124,21 @@
       ctx.closePath();
       ctx.fill();
     }
-    // Inner shadow along the wall
-    tracePoly(COURSE.boundary);
+    for (const s of c.slopes) drawSlope(s);
+    // Inner shadow along the walls
+    ctx.lineCap = 'butt';
     ctx.lineWidth = 8;
     ctx.strokeStyle = 'rgba(0,0,0,0.12)';
-    ctx.stroke();
+    strokeSegments(c.walls);
     ctx.restore();
 
     // Tee mat
-    ctx.fillStyle = 'rgba(255,255,255,0.18)';
-    roundRect(COURSE.tee.x - 22, COURSE.tee.y - 14, 44, 28, 6);
+    ctx.fillStyle = 'rgba(255,255,255,0.2)';
+    roundRect(c.tee.x - 20, c.tee.y - 12, 40, 24, 6);
     ctx.fill();
 
     // Sand
-    for (const s of COURSE.sand) {
+    for (const s of c.sand) {
       ctx.beginPath();
       ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
       ctx.fillStyle = '#ecd9a0';
@@ -897,7 +1147,7 @@
       ctx.strokeStyle = '#d2b978';
       ctx.stroke();
       ctx.fillStyle = 'rgba(160,130,70,0.35)';
-      for (let i = 0; i < 14; i++) {
+      for (let i = 0; i < 12; i++) {
         const a = i * 2.4;
         const rr = (s.r - 6) * ((i * 37) % 10) / 10;
         ctx.fillRect(s.x + Math.cos(a) * rr, s.y + Math.sin(a) * rr, 2, 2);
@@ -905,11 +1155,11 @@
     }
 
     // Water
-    for (const w of COURSE.water) {
-      roundRect(w.x - 3, w.y - 3, w.w + 6, w.h + 6, 14);
+    for (const w of c.water) {
+      roundRect(w.x - 3, w.y - 3, w.w + 6, w.h + 6, 12);
       ctx.fillStyle = '#2b7fb3';
       ctx.fill();
-      roundRect(w.x, w.y, w.w, w.h, 12);
+      roundRect(w.x, w.y, w.w, w.h, 10);
       ctx.fillStyle = '#4fb3ea';
       ctx.fill();
       ctx.save();
@@ -917,53 +1167,37 @@
       ctx.strokeStyle = 'rgba(255,255,255,0.45)';
       ctx.lineWidth = 2;
       for (let i = 0; i < 3; i++) {
-        const y = w.y + 12 + i * 14;
-        const off = Math.sin(state.time * 1.5 + i) * 6;
+        const y = w.y + 9 + i * 11;
+        const off = Math.sin(state.time * 1.5 + i) * 5;
         ctx.beginPath();
-        ctx.moveTo(w.x + 10 + off, y);
-        ctx.quadraticCurveTo(w.x + 20 + off, y - 4, w.x + 30 + off, y);
+        ctx.moveTo(w.x + 8 + off, y);
+        ctx.quadraticCurveTo(w.x + 16 + off, y - 4, w.x + 24 + off, y);
         ctx.stroke();
       }
       ctx.restore();
     }
 
-    // Blocks
-    for (const poly of COURSE.blocks) {
+    // Solid obstacles (white, like the walls)
+    for (const s of c.solids) {
       ctx.save();
       ctx.translate(0, 3);
-      tracePoly(poly);
-      ctx.fillStyle = 'rgba(0,0,0,0.25)';
+      tracePoly(s.pts);
+      ctx.fillStyle = 'rgba(0,0,0,0.28)';
       ctx.fill();
       ctx.restore();
-      tracePoly(poly);
-      ctx.fillStyle = '#a06a3a';
+      tracePoly(s.pts);
+      ctx.fillStyle = '#ffffff';
       ctx.fill();
-      ctx.lineWidth = 3;
-      ctx.strokeStyle = '#6b4423';
+      ctx.lineJoin = 'round';
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = '#dfe5dc';
       ctx.stroke();
     }
 
-    // Bumpers
-    for (const c of COURSE.bumpers) {
-      ctx.beginPath();
-      ctx.arc(c.x, c.y + 3, c.r, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(0,0,0,0.25)';
-      ctx.fill();
-      ctx.beginPath();
-      ctx.arc(c.x, c.y, c.r, 0, Math.PI * 2);
-      ctx.fillStyle = '#f2c94c';
-      ctx.fill();
-      ctx.lineWidth = 3;
-      ctx.strokeStyle = '#c99a1a';
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.arc(c.x - c.r * 0.3, c.y - c.r * 0.3, c.r * 0.3, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(255,255,255,0.6)';
-      ctx.fill();
-    }
+    for (const b of c.bumpers) drawBumper(b);
 
     // Hole
-    const h = COURSE.hole;
+    const h = c.hole;
     ctx.beginPath();
     ctx.arc(h.x, h.y, HOLE_R + 2, 0, Math.PI * 2);
     ctx.fillStyle = 'rgba(255,255,255,0.5)';
@@ -974,11 +1208,10 @@
     ctx.fill();
   }
 
-  function drawFlag() {
-    const h = COURSE.hole;
-    const b = current().ball;
+  function drawFlag(focusBall) {
+    const h = course().hole;
     // Fade the flag when a ball is near so it doesn't hide the putt.
-    const near = state.phase !== 'menu' && Math.hypot(b.x - h.x, b.y - h.y) < 70;
+    const near = focusBall && Math.hypot(focusBall.x - h.x, focusBall.y - h.y) < 70;
     ctx.save();
     ctx.globalAlpha = near ? 0.35 : 1;
     ctx.strokeStyle = '#f5f5f5';
@@ -996,6 +1229,46 @@
     ctx.closePath();
     ctx.fill();
     ctx.restore();
+  }
+
+  function render() {
+    ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
+    drawCourse();
+    if (!course()) return;
+
+    if (state.phase === 'menu') {
+      drawFlag(null);
+      return;
+    }
+
+    // The ball in focus is the one moving / animating, otherwise whoever's up.
+    const focus = state.roll ? state.roll.player : state.anim ? state.anim.player : state.turn;
+    const live = state.view === state.hole; // false while replaying an earlier hole
+
+    // Other balls are ghosts (balls don't collide with each other).
+    if (live) {
+      state.players.forEach((p, i) => {
+        if (i === focus || p.done) return;
+        drawBall(p.ball.x, p.ball.y, COLORS[i], 0.45);
+      });
+    }
+
+    let focusBall = null;
+    if (state.roll) {
+      focusBall = state.roll.ball;
+      drawBall(focusBall.x, focusBall.y, COLORS[focus], 1);
+    } else if (state.anim) {
+      drawAnim();
+    } else if (live && !state.players[focus].done) {
+      const b = state.players[focus].ball;
+      focusBall = b;
+      const myShot = state.phase === 'aim';
+      if (myShot && !state.aim) drawIdleHint();
+      drawBall(b.x, b.y, COLORS[focus], myShot || state.phase === 'over' ? 1 : 0.75);
+      if (myShot) drawAim();
+    }
+
+    drawFlag(focusBall);
   }
 
   function drawBall(x, y, color, alpha, radius = BALL_R) {
@@ -1097,7 +1370,7 @@
     a.vy *= k;
     a.x += a.vx * dt;
     a.y += a.vy * dt;
-    const h = COURSE.hole;
+    const h = course().hole;
     const dx = a.x - h.x;
     const dy = a.y - h.y;
     const d = Math.hypot(dx, dy);
@@ -1122,7 +1395,7 @@
       // The ball drops where it went in: it shrinks and darkens, and anything
       // outside the cup edge is clipped so it looks like it's below the rim.
       const p = Math.min(a.t / SINK_TIME, 1);
-      const h = COURSE.hole;
+      const h = course().hole;
       ctx.save();
       ctx.beginPath();
       ctx.arc(h.x, h.y, HOLE_R + BALL_R * (1 - p) * 1.2, 0, Math.PI * 2);
@@ -1147,40 +1420,6 @@
     }
     ctx.restore();
   }
-
-  function render() {
-    ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
-    drawCourse();
-
-    if (state.phase === 'menu') {
-      drawFlag();
-      return;
-    }
-
-    // The ball in focus is the one moving / animating, otherwise whoever's up.
-    const focus = state.roll ? state.roll.player : state.anim ? state.anim.player : state.turn;
-
-    // Other balls are ghosts (balls don't collide with each other).
-    state.players.forEach((p, i) => {
-      if (i === focus || p.done) return;
-      drawBall(p.ball.x, p.ball.y, COLORS[i], 0.45);
-    });
-
-    if (state.roll) {
-      drawBall(state.roll.ball.x, state.roll.ball.y, COLORS[focus], 1);
-    } else if (state.anim) {
-      drawAnim();
-    } else if (!state.players[focus].done) {
-      const b = state.players[focus].ball;
-      const myShot = state.phase === 'aim';
-      if (myShot && !state.aim) drawIdleHint();
-      drawBall(b.x, b.y, COLORS[focus], myShot || state.phase === 'over' ? 1 : 0.75);
-      if (myShot) drawAim();
-    }
-
-    drawFlag();
-  }
-
   // ---------- Main loop ----------
   let last = performance.now();
   let acc = 0;
@@ -1260,6 +1499,7 @@
       hit: (p) => { tone(900, 0.06, 'triangle', 0.25 + p * 0.3, 500); noise(0.04, 0.2, 3000); },
       wall: (p) => tone(320, 0.05, 'square', 0.04 + p * 0.12, 200),
       rim: () => tone(1400, 0.07, 'triangle', 0.12, 900),
+      bump: () => { tone(260, 0.12, 'square', 0.12, 520); tone(520, 0.1, 'triangle', 0.15, 1040); },
       sink: () => { tone(220, 0.14, 'sine', 0.45, 110); noise(0.06, 0.25, 1200); setTimeout(() => tone(160, 0.12, 'sine', 0.3, 90), 120); },
       splash: () => noise(0.5, 0.35, 900),
     };
@@ -1269,6 +1509,8 @@
   // ---------- Boot ----------
   loadNames();
   setMenuMode('link');
+  // A sample hole sits behind the menu.
+  state.holes = [Gen.generateHole(20261006, 2)];
   resize();
   updateHud();
   if (!loadFromHash()) showMenu();

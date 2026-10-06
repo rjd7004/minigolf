@@ -63,11 +63,24 @@ html, body {
 .player-card[data-player="1"].active { border-color: var(--p1); }
 .player-card.done { opacity: 0.7; }
 
+.player-card .who {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.15;
+}
+.player-card[data-player="1"] .who { align-items: flex-end; }
 .player-card .name {
   font-weight: 600;
   font-size: 15px;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.player-card .total {
+  font-size: 11px;
+  opacity: 0.75;
   white-space: nowrap;
 }
 .player-card .strokes {
@@ -327,4 +340,60 @@ html, body {
   font-size: 11px;
   font-weight: 600;
   pointer-events: none;
+}
+
+/* ---------- Scorecard ---------- */
+.scorecard {
+  width: 100%;
+  margin: 4px 0 6px;
+  border-collapse: separate;
+  border-spacing: 0 4px;
+  font-variant-numeric: tabular-nums;
+  font-size: 15px;
+}
+.scorecard td {
+  padding: 7px 3px;
+  text-align: center;
+  background: #f1f4ec;
+}
+.scorecard td:first-child {
+  text-align: left;
+  padding-left: 8px;
+  border-radius: 10px 0 0 10px;
+  max-width: 84px;
+}
+.scorecard td:last-child { border-radius: 0 10px 10px 0; padding-right: 8px; }
+.scorecard tr:first-child td {
+  background: none;
+  padding: 0 3px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+.scorecard tr.par td { background: none; color: var(--muted); font-size: 13px; padding: 2px 3px; }
+.scorecard td:first-child .dot { display: inline-block; vertical-align: -2px; margin-right: 6px; width: 12px; height: 12px; }
+.scorecard td:first-child .name {
+  display: inline-block;
+  max-width: 58px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+  font-weight: 600;
+}
+.scorecard td.under { color: #1f8a3a; font-weight: 800; }
+.scorecard td.over { color: #b4472e; }
+.scorecard td.tot { font-weight: 800; font-size: 17px; }
+.scorecard td.tot small { display: block; font-size: 11px; font-weight: 600; color: var(--muted); }
+.scorecard tr.winner td { background: #fff4c7; }
+
+/* Narrow phones (e.g. iPhone SE): give the names more room. */
+@media (max-width: 380px) {
+  #hud { gap: 6px; padding: 8px 8px; }
+  .player-card { gap: 6px; padding: 6px 8px; }
+  .player-card .dot { display: none; }
+  .player-card[data-player="0"] { box-shadow: inset 4px 0 0 var(--p0); }
+  .player-card[data-player="1"] { box-shadow: inset -4px 0 0 var(--p1); }
+  .player-card .strokes { font-size: 20px; }
+  .hole-label { font-size: 14px; }
 }

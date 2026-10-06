@@ -15,23 +15,23 @@
   <meta property="og:image" content="https://rjd7004.github.io/minigolf/preview.png">
   <meta name="twitter:card" content="summary_large_image">
   <link rel="apple-touch-icon" href="icon.png">
-  <link rel="stylesheet" href="style.css?v=1.4">
+  <link rel="stylesheet" href="style.css?v=2.0">
 </head>
 <body>
   <div id="app">
     <header id="hud">
       <div class="player-card" data-player="0">
         <span class="dot"></span>
-        <span class="name">Player 1</span>
+        <span class="who"><span class="name">Player 1</span><span class="total"></span></span>
         <span class="strokes">0</span>
       </div>
       <button id="hole-info" type="button" aria-label="New game">
-        <div class="hole-label">Hole 1</div>
-        <div class="par-label">Par 3</div>
+        <div id="hole-label" class="hole-label">5 holes</div>
+        <div id="par-label" class="par-label">Mini Golf</div>
       </button>
       <div class="player-card" data-player="1">
         <span class="strokes">0</span>
-        <span class="name">Player 2</span>
+        <span class="who"><span class="name">Player 2</span><span class="total"></span></span>
         <span class="dot"></span>
       </div>
     </header>
@@ -98,8 +98,9 @@
       </div>
     </div>
   </div>
-  <!-- Bump the version here (label + both ?v= links) on each release. -->
-  <div id="version" aria-hidden="true">v1.4</div>
-  <script src="game.js?v=1.4"></script>
+  <!-- Bump the version here (label + every ?v= link) on each release. -->
+  <div id="version" aria-hidden="true">v2.0</div>
+  <script src="course.js?v=2.0"></script>
+  <script src="game.js?v=2.0"></script>
 </body>
 </html>
