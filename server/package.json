@@ -1,0 +1,12 @@
+{
+  "name": "minigolf-sync",
+  "private": true,
+  "description": "Turn sync and push notifications for Mini Golf (Cloudflare Worker)",
+  "scripts": {
+    "dev": "wrangler dev --var ALLOW_HTTP_PUSH:1",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

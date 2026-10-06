@@ -8,6 +8,8 @@ A simple 2D minigolf game for the browser, in the style of GamePigeon mini golf.
 
 The whole game is stored in the link itself (the part after `#`), so there's no server or account. The holes aren't in the link: both phones rebuild the same five holes from a random seed. Each phone remembers the newest turn it has seen, so reopening an old link won't let anyone retake a shot.
 
+**Turn sync and notifications (optional server).** With the small sync server in `server/` deployed and its address in `config.js`, you only text the link once, to invite someone. After that, turns go back and forth by themselves: the waiting phone picks up the other player's move within a few seconds while the game is open, and if it isn't open, you get a push notification like "Alex played you back!". On iPhone, notifications only work once the game is added to the Home Screen (Share → Add to Home Screen, iOS 16.4 or later) and opened from there; then tap **Notify me**. Without a server, everything still works by sending links. Setup steps are in [server/README.md](server/README.md).
+
 **Same phone.** Enter both names and pass the phone back and forth.
 
 ## How to play
@@ -35,6 +37,7 @@ On iOS, "Add to Home Screen" runs it full screen.
 
 The version shows in the bottom-right corner. It's set in `index.html`: when releasing, bump the label and every `?v=` link to the stylesheet and scripts (the `?v=` makes phones fetch the new files instead of a cached copy).
 
+- v3.0: optional sync server: turns sync automatically and push notifications when it's your turn; installable Home Screen app
 - v2.1: stronger bumpers, slopes only in corridors, no stroke limit, wins leaderboard, cup draws in slow balls on its edge
 - v2.0: five randomly generated holes per round, kicking bumpers, slopes, white walls and obstacles, scorecard
 - v1.4: slightly easier drop-ins, especially near the edge of the cup
@@ -49,4 +52,7 @@ The version shows in the bottom-right corner. It's set in `index.html`: when rel
 - `style.css`: mobile-first styling
 - `course.js`: the hole generator. Each hole is a path of cells on a 5×8 grid from the tee to the cup, widened in places, with walls wherever a cell borders the rough. Every fairway cell joins that one path, so there are no walled-off islands. After obstacles are added, the hole is flood-filled at ball size and thrown away if the cup or any open area can't be reached. Difficulty per hole is set in the `LEVELS` table.
 - `game.js`: physics, input, rendering, turn and hole flow, and the link encoding
-- `preview.png`, `icon.png`: link preview image and home-screen icon
+- `config.js`: the sync server's address (empty = links only)
+- `sw.js`, `manifest.webmanifest`: service worker (shows notifications) and app manifest for installing to the Home Screen
+- `server/`: the optional sync server (Cloudflare Worker), see [server/README.md](server/README.md)
+- `preview.png`, `icon*.png`: link preview image and app icons

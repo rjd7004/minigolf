@@ -163,7 +163,7 @@
   }
 
   // ---------- Starting games ----------
-  function newGame(mode, names, starter, me) {
+  function newGame(mode, names, starter, me, rematchOf) {
     state.mode = mode;
     state.id = randomId(); // also keys the leaderboard, so a game is only counted once
     state.seq = 0;
@@ -178,8 +178,13 @@
     state.introPending = true;
     state.roll = state.anim = state.aim = null;
     hideOverlays();
-    if (isLink()) commit();
-    else history.replaceState(null, '', location.pathname + location.search);
+    syncFailed = false;
+    if (isLink()) {
+      commit(rematchOf ? { from: rematchOf } : undefined);
+      attachPush();
+    } else {
+      history.replaceState(null, '', baseUrl());
+    }
     routeTurn();
   }
 
@@ -200,7 +205,11 @@
 
   function rematch() {
     const names = state.players.map((p) => p.name);
-    newGame(state.mode, names, 1 - state.starter, state.me);
+    const oldId = state.id;
+    const wasOnline = online();
+    newGame(state.mode, names, 1 - state.starter, state.me, wasOnline ? oldId : null);
+    // Point the old game at the new one so your friend's app can follow you there.
+    if (wasOnline) api(`/api/game/${oldId}/next`, { method: 'POST', body: JSON.stringify({ next: state.id }) });
   }
 
   function randomId() {
@@ -329,7 +338,12 @@
     }
     state.introPending = false;
     state.phase = 'share';
-    setTimeout(() => { if (state.phase === 'share') showShare(); }, 700);
+    setTimeout(() => {
+      if (state.phase !== 'share') return;
+      // Online, once your friend has joined, the turn goes to them by itself.
+      if (online() && state.players[1].name && !syncFailed) showWaitBar();
+      else showShare();
+    }, 700);
   }
 
   function startAnim(kind, ball, player, onDone) {
@@ -364,7 +378,9 @@
     nameInputs[0].placeholder = mode === 'local' ? 'Player 1' : 'Your name';
     $('mode-help').textContent = mode === 'local'
       ? 'Two players, one phone. Pass it back and forth. 5 new holes every round.'
-      : 'You take a shot, then text your friend a link. They play their shot on their phone and send one back. 5 new holes every round.';
+      : (SERVER
+        ? 'Text your friend a link once. After that, turns go back and forth by themselves, with a notification when it\'s your turn. 5 new holes every round.'
+        : 'You take a shot, then text your friend a link. They play their shot on their phone and send one back. 5 new holes every round.');
   }
 
   function relPar(n) {
@@ -520,15 +536,23 @@
     $('share-text').textContent = state.shots.length
       ? `Send ${friend} the link. They'll watch your shot${state.shots.length > 1 ? 's' : ''}, then take theirs.`
       : `Send ${friend} the link so they can tee off.`;
+    if (online() && !joined) {
+      $('share-text').textContent = `Send your friend the link to join. After that, turns go back and forth by themselves${pushSupported() || isIos() ? ' and you each get a notification when it\'s your turn' : ''}.`;
+    } else if (online() && syncFailed) {
+      $('share-text').textContent = `Couldn't reach the game server. Send ${friend} the link instead.`;
+    }
     $('share-btn').textContent = joined ? `Send to ${friend}` : 'Send link';
     $('copy-btn').textContent = 'Copy link';
+    refreshNotifyUi();
     sharePanel.classList.remove('hidden');
   }
 
   function showWaitBar() {
     hideOverlays();
     const friend = state.players[1].name ? nameOf(state.turn) : 'your friend';
-    $('wait-text').textContent = `Waiting for ${friend}`;
+    $('wait-text').textContent = `Waiting for ${friend}…`;
+    $('resend-btn').textContent = online() ? 'Link' : 'Send link';
+    refreshNotifyUi();
     waitBar.classList.remove('hidden');
   }
 
@@ -551,6 +575,7 @@
     saveName(0, name); // on this phone, you're the one typing in the first box
     nameInputs[0].value = name;
     commit();
+    attachPush();
     hideOverlays();
     playReplaysThenRoute();
   }
@@ -688,15 +713,28 @@
   }
 
   // Record a new version of the game: bump seq, save it, and put it in the address bar.
-  function commit() {
+  function commit(extra) {
     state.seq++;
     remember();
-    history.replaceState(null, '', gameUrl());
+    setUrl();
     currentCode = encodeGame();
+    syncUp(extra);
   }
 
+  function baseUrl() {
+    return location.href.split(/[?#]/)[0];
+  }
+
+  // The link you send to invite someone (the whole game is in it).
   function gameUrl() {
-    return `${location.href.split('#')[0]}#g=${encodeGame()}`;
+    return `${baseUrl()}#g=${encodeGame()}`;
+  }
+
+  // What's shown in the address bar. Online games use ?game=<id>&p=<me> so a
+  // Home Screen icon (or a notification tap) can find the game on the server.
+  function setUrl() {
+    if (!isLink()) return;
+    history.replaceState(null, '', online() ? `${baseUrl()}?game=${state.id}&p=${state.me}` : gameUrl());
   }
 
   function shareMessage() {
@@ -747,17 +785,25 @@
     const m = location.hash.match(/^#g=([A-Za-z0-9_-]+)$/);
     if (!m) return false;
     if (m[1] === currentCode) return true;
-    let g = decodeGame(m[1]);
+    const g = decodeGame(m[1]);
     if (!g || g === 'old') {
       showMenu();
       showBanner(g === 'old' ? 'That link is from an older version. Start a new game!' : "Couldn't read that game link", '#c0392b', 3000);
       return false;
     }
+    applyGame(g);
+    // The server may already be further along than this link.
+    if (online()) poll(true);
+    return true;
+  }
+
+  // Take over a game state (from a link, or from the server) and carry on from it.
+  function applyGame(g, meHint) {
     const store = loadStore();
     const saved = store[g.id];
     let newer = false;
     if (saved && saved.seq > g.seq) {
-      // This phone has already moved past this link (e.g. you reopened a link you already played).
+      // This phone has already moved past this state (e.g. you reopened a link you already played).
       const g2 = decodeGame(saved.code);
       if (g2 && g2 !== 'old') { g = g2; newer = true; }
     }
@@ -774,24 +820,26 @@
     state.starter = g.starter;
     state.players = g.players;
     state.roll = state.anim = state.aim = null;
-    state.me = saved ? saved.me : (!g.players[1].name ? 1 : g.turn);
+    if (saved) state.me = saved.me;
+    else if (meHint === 0 || meHint === 1) state.me = meHint;
+    else state.me = !g.players[1].name ? 1 : g.turn;
     // Shots by the other player get replayed here; my own stay queued for the next link.
     state.shots = g.shots.filter((s) => s.p === state.me);
     state.replayQueue = seenBefore ? [] : g.shots.filter((s) => s.p !== state.me);
     state.introPending = false;
     currentCode = encodeGame();
-    if (newer) history.replaceState(null, '', gameUrl());
+    if (newer || online()) setUrl();
 
     hideOverlays();
     updateHud();
     if (state.me === 1 && !state.players[1].name) {
       state.phase = 'join';
       showJoin();
-      return true;
+      return;
     }
     remember();
+    attachPush();
     playReplaysThenRoute();
-    return true;
   }
 
   // Show the other player's shots rolling (switching to earlier holes if
@@ -852,6 +900,196 @@
       sound.hit(shot.w);
       state.phase = 'rolling';
     }, changedHole ? 1100 : 800);
+  }
+
+  // ---------- Online sync (optional) ----------
+  // With a sync server configured (config.js), link games are stored on the
+  // server: each finished turn is uploaded, the waiting phone checks for the
+  // other player's move every few seconds while it's open, and the server sends
+  // a push notification ("Alex played you back!") when it's your turn and your
+  // app isn't open. Without a server, everything works by sending links.
+  const SERVER = (window.MINIGOLF_SERVER || '').replace(/\/+$/, '');
+  const POLL_MS = 4000;
+  let syncFailed = false;
+
+  function online() {
+    return isLink() && !!SERVER && !!state.id;
+  }
+
+  async function api(path, opts = {}) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 8000);
+    try {
+      const res = await fetch(SERVER + path, { ...opts, signal: ctrl.signal, headers: { 'Content-Type': 'application/json' } });
+      let data = null;
+      try { data = await res.json(); } catch (e) { /* no body */ }
+      return { status: res.status, data };
+    } catch (e) {
+      return { status: 0, data: null };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  // Upload the current state. If it's now the other player's move, ask the
+  // server to notify them (it skips that if their app is open).
+  let uploads = Promise.resolve();
+  function syncUp(extra) {
+    if (!online()) return;
+    const id = state.id;
+    const body = { code: encodeGame(), seq: state.seq, ...(extra || {}) };
+    const other = 1 - state.me;
+    if (state.players[1].name) {
+      const me = nameOf(state.me);
+      let text = null;
+      if (roundOver()) text = `${me} finished the round. See who won!`;
+      else if (state.turn === other) text = body.from ? `${me} wants a rematch! You're up.` : `${me} played you back!`;
+      if (text) body.notify = { to: other, body: text, url: `${baseUrl()}?game=${id}&p=${other}` };
+    }
+    uploads = uploads.then(async () => {
+      const r = await api(`/api/game/${id}`, { method: 'PUT', body: JSON.stringify(body) });
+      if (state.id !== id) return;
+      if (r.status === 200) {
+        syncFailed = false;
+      } else if (r.status === 409 && r.data && r.data.code) {
+        // The server is further along than this phone: take its version.
+        const g = decodeGame(r.data.code);
+        if (g && g !== 'old' && g.id === id && r.data.seq > state.seq) applyGame(g);
+      } else {
+        syncFailed = true;
+        if (state.phase === 'share') showShare(); // fall back to sending the link
+      }
+    });
+  }
+
+  // While waiting (or on the results screen, for rematches), check the server
+  // for the other player's move. These checks also tell the server this app is
+  // open, so it doesn't send a notification you'd see on top of the game.
+  let polling = false;
+  async function poll(force) {
+    if (!online() || polling || document.visibilityState !== 'visible') return;
+    if (!force && state.phase !== 'share' && state.phase !== 'over') return;
+    polling = true;
+    const id = state.id;
+    const r = await api(`/api/game/${id}?p=${state.me}`);
+    polling = false;
+    if (state.id !== id) return;
+    if (r.status === 200 && r.data) {
+      if (r.data.seq > state.seq) {
+        const g = decodeGame(r.data.code);
+        if (g && g !== 'old' && g.id === id) applyGame(g);
+      } else if (r.data.next && state.phase === 'over') {
+        followRematch(r.data.next);
+      }
+    } else if (r.status === 404 && state.seq > 0) {
+      syncUp(); // the server never got this game (e.g. it was offline): send it now
+    }
+  }
+  setInterval(poll, POLL_MS);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') poll(); });
+
+  async function followRematch(nextId) {
+    const r = await api(`/api/game/${nextId}?p=${state.me}`);
+    if (r.status !== 200 || !r.data) return;
+    const g = decodeGame(r.data.code);
+    if (!g || g === 'old' || g.id !== nextId) return;
+    const who = nameOf(1 - state.me);
+    applyGame(g, state.me);
+    showBanner(`${who} started a rematch!`, COLORS[1 - state.me], 1500);
+  }
+
+  // Open ?game=<id>&p=<me> (from a notification tap or the Home Screen icon).
+  async function loadFromServer(id, p) {
+    showBanner('Loading game…', '#1d2a1f', 8000);
+    const r = await api(`/api/game/${id}?p=${p}`);
+    banner.classList.remove('show');
+    const g = r.status === 200 && r.data ? decodeGame(r.data.code) : null;
+    if (!g || g === 'old' || g.id !== id) {
+      showMenu();
+      showBanner("Couldn't load that game", '#c0392b', 3000);
+      return;
+    }
+    applyGame(g, p === '0' ? 0 : p === '1' ? 1 : undefined);
+  }
+
+  // ---------- Push notifications ----------
+  let swReg = null;
+  if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
+    navigator.serviceWorker.register('sw.js').then((reg) => { swReg = reg; refreshNotifyUi(); }).catch(() => {});
+    navigator.serviceWorker.addEventListener('message', (e) => {
+      const m = e.data || {};
+      if (m.type === 'sync') poll(true);
+      if (m.type === 'open' && m.url) {
+        const id = new URL(m.url).searchParams.get('game');
+        if (id && id !== state.id) location.href = m.url;
+        else poll(true);
+      }
+    });
+  }
+
+  function pushSupported() {
+    return !!SERVER && 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+  }
+
+  function isIos() {
+    return /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  }
+
+  function standalone() {
+    return window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+  }
+
+  // Show "Notify me" when notifications are possible but not on yet, or the
+  // Home Screen tip on iPhones (where web apps only get notifications from there).
+  function refreshNotifyUi() {
+    const can = online() && pushSupported() && Notification.permission === 'default';
+    const needsInstall = online() && !!SERVER && isIos() && !standalone() && !pushSupported();
+    document.querySelectorAll('.notify-btn').forEach((b) => b.classList.toggle('hidden', !can));
+    document.querySelectorAll('.install-hint').forEach((h) => h.classList.toggle('hidden', !needsInstall));
+  }
+
+  function b64urlToBytes(s) {
+    const bin = atob(s.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((s.length + 3) % 4));
+    return Uint8Array.from(bin, (c) => c.charCodeAt(0));
+  }
+
+  async function enablePush() {
+    try {
+      const perm = await Notification.requestPermission();
+      refreshNotifyUi();
+      if (perm !== 'granted') {
+        showBanner('Notifications are off', '#c0392b', 2000);
+        return;
+      }
+      const reg = swReg || await navigator.serviceWorker.ready;
+      let sub = await reg.pushManager.getSubscription();
+      if (!sub) {
+        const r = await api('/api/vapid');
+        if (!r.data || !r.data.publicKey) throw new Error('no key');
+        sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64urlToBytes(r.data.publicKey) });
+      }
+      attachedTo = '';
+      await attachPush();
+      showBanner("You'll get a notification when it's your turn", '#1f8a3a', 2200);
+    } catch (e) {
+      showBanner("Couldn't turn on notifications", '#c0392b', 2500);
+    }
+  }
+
+  // Tell this game's server which device to notify for my player.
+  let attachedTo = '';
+  async function attachPush() {
+    refreshNotifyUi();
+    if (!online() || !pushSupported() || Notification.permission !== 'granted') return;
+    const key = `${state.id}:${state.me}`;
+    if (attachedTo === key) return;
+    try {
+      const reg = swReg || await navigator.serviceWorker.getRegistration();
+      const sub = reg && await reg.pushManager.getSubscription();
+      if (!sub) return;
+      const r = await api(`/api/game/${state.id}/subscribe`, { method: 'POST', body: JSON.stringify({ p: state.me, subscription: sub.toJSON() }) });
+      if (r.status === 200) attachedTo = key;
+    } catch (e) { /* not fatal */ }
   }
 
   // ---------- Input ----------
@@ -916,6 +1154,10 @@
   $('view-btn').addEventListener('click', showWaitBar);
   $('resend-btn').addEventListener('click', showShare);
   $('join-btn').addEventListener('click', join);
+  document.querySelectorAll('.notify-btn').forEach((b) => b.addEventListener('click', enablePush));
+  document.querySelectorAll('.install-hint').forEach((h) => h.addEventListener('click', () => {
+    showBanner('Tap Share, then "Add to Home Screen"', '#1d2a1f', 3500);
+  }));
   $('join-name').addEventListener('keydown', (e) => { if (e.key === 'Enter') join(); });
   $('hole-info').addEventListener('click', () => {
     if (state.phase === 'menu') return;
@@ -1613,6 +1855,11 @@
   state.holes = [Gen.generateHole(20261006, 2)];
   resize();
   updateHud();
-  if (!loadFromHash()) showMenu();
+  const params = new URLSearchParams(location.search);
+  if (params.get('game') && SERVER && /^[a-z0-9]{1,16}$/.test(params.get('game'))) {
+    loadFromServer(params.get('game'), params.get('p'));
+  } else if (!loadFromHash()) {
+    showMenu();
+  }
   requestAnimationFrame(frame);
 })();
