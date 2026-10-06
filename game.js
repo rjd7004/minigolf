@@ -10,11 +10,18 @@
   const MAX_SPEED = 1150;     // world units / second at full power
   const MAX_DRAG = 150;       // drag distance (world units) for full power
   const MIN_POWER = 0.05;     // shorter drags are treated as a cancel
-  const ROLL_FRICTION = 150;  // constant deceleration
-  const DRAG_COEF = 0.55;     // speed-proportional deceleration
+  // Rolling resistance is mostly proportional to speed, so the ball slows
+  // exponentially and glides to a stop instead of braking hard at the end.
+  const ROLL_FRICTION = 20;   // small constant deceleration so it does finally stop
+  const DRAG_COEF = 0.9;      // speed-proportional deceleration (per second)
   const SAND_MULT = 5;
-  const STOP_SPEED = 8;
-  const CAPTURE_SPEED = 560;  // faster than this and the ball lips out
+  const STOP_SPEED = 4;
+  // The cup: while the ball's centre is over it, the slope pulls the ball toward
+  // the middle. Fast balls get bent around the rim and roll on; slow ones drop.
+  const CAPTURE_SPEED = 480;  // max speed that drops when dead-centre; less toward the edge
+  const RIM_PULL = 4200;      // how hard the lip bends the ball's path toward the cup centre
+  const RIM_WIDTH = 3;        // the lip starts this far outside the cup edge
+  const RIM_DRAG = 0.997;     // speed kept per physics step while riding the rim
   const RESTITUTION = 0.75;
   const MAX_STROKES = 10;
   const PAR = 3;
@@ -195,6 +202,7 @@
   }
 
   function launch(ball, from, power, angle) {
+    ball.onRim = false;
     ball.x = from.x;
     ball.y = from.y;
     ball.vx = Math.cos(angle) * power * MAX_SPEED;
@@ -765,18 +773,26 @@
     for (const s of segments) collideSegment(b, s);
     for (const c of COURSE.bumpers) collideBumper(b, c);
 
-    // Hole: slow enough and it drops; too fast and it curls around the lip.
+    // Hole: slower than the capture speed for how far off-centre it is and it
+    // drops. Otherwise the lip bends its path toward the cup (without adding
+    // speed) and it rolls back out on a new line, like a ball riding a rim.
     const hx = COURSE.hole.x - b.x;
     const hy = COURSE.hole.y - b.y;
     const hd = Math.hypot(hx, hy);
     speed = Math.hypot(b.vx, b.vy);
-    if (hd < HOLE_R) {
-      if (speed < CAPTURE_SPEED) return 'sink';
-      const pull = 2600 * dt;
-      b.vx += (hx / hd) * pull;
-      b.vy += (hy / hd) * pull;
-      b.vx *= 0.995;
-      b.vy *= 0.995;
+    if (hd < HOLE_R && speed < CAPTURE_SPEED * Math.sqrt(1 - hd / HOLE_R)) return 'sink';
+    if (hd < HOLE_R + RIM_WIDTH && hd > 0.01 && speed > 0) {
+      b.vx += (hx / hd) * RIM_PULL * dt;
+      b.vy += (hy / hd) * RIM_PULL * dt;
+      const k = (speed * RIM_DRAG) / Math.hypot(b.vx, b.vy);
+      b.vx *= k;
+      b.vy *= k;
+      if (!b.onRim) {
+        b.onRim = true;
+        sound.rim();
+      }
+    } else {
+      b.onRim = false;
     }
 
     if (inWater(b)) return 'water';
@@ -1189,6 +1205,7 @@
       unlock,
       hit: (p) => { tone(900, 0.06, 'triangle', 0.25 + p * 0.3, 500); noise(0.04, 0.2, 3000); },
       wall: (p) => tone(320, 0.05, 'square', 0.04 + p * 0.12, 200),
+      rim: () => tone(1400, 0.07, 'triangle', 0.12, 900),
       sink: () => { tone(500, 0.12, 'sine', 0.35, 250); setTimeout(() => tone(700, 0.18, 'sine', 0.3, 1000), 140); },
       splash: () => noise(0.5, 0.35, 900),
     };
