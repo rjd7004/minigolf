@@ -15,7 +15,8 @@
   <meta property="og:image" content="https://rjd7004.github.io/minigolf/preview.png">
   <meta name="twitter:card" content="summary_large_image">
   <link rel="apple-touch-icon" href="icon.png">
-  <link rel="stylesheet" href="style.css?v=2.1">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="style.css?v=3.0">
 </head>
 <body>
   <div id="app">
@@ -41,6 +42,8 @@
       <div id="banner" aria-live="polite"></div>
       <div id="waitbar" class="hidden">
         <span id="wait-text">Waiting for your friend</span>
+        <button class="notify-btn hidden" type="button">🔔 Notify me</button>
+        <button class="install-hint hidden" type="button">🔔 How?</button>
         <button id="resend-btn" type="button">Send link</button>
       </div>
     </main>
@@ -94,6 +97,8 @@
         <h1 id="share-title">Their turn</h1>
         <p id="share-text" class="sub"></p>
         <button id="share-btn" class="btn" type="button">Send link</button>
+        <button class="notify-btn btn secondary hidden" type="button">🔔 Notify me when it's my turn</button>
+        <p class="install-hint hidden">On iPhone, notifications need the game on your Home Screen: tap Share, then "Add to Home Screen", and open it from there.</p>
         <button id="copy-btn" class="btn secondary" type="button">Copy link</button>
         <button id="view-btn" class="btn ghost" type="button">View course</button>
       </div>
@@ -112,8 +117,9 @@
     </div>
   </div>
   <!-- Bump the version here (label + every ?v= link) on each release. -->
-  <div id="version" aria-hidden="true">v2.1</div>
-  <script src="course.js?v=2.1"></script>
-  <script src="game.js?v=2.1"></script>
+  <div id="version" aria-hidden="true">v3.0</div>
+  <script src="config.js?v=3.0"></script>
+  <script src="course.js?v=3.0"></script>
+  <script src="game.js?v=3.0"></script>
 </body>
 </html>

@@ -318,6 +318,7 @@ html, body {
 }
 #waitbar.hidden { display: none; }
 #wait-text { overflow: hidden; text-overflow: ellipsis; }
+#waitbar .notify-btn, #waitbar .install-hint,
 #resend-btn {
   flex: none;
   padding: 8px 14px;
@@ -411,4 +412,15 @@ html, body {
   margin-right: 6px;
   color: var(--muted);
   font-weight: 800;
+}
+
+/* ---------- Notifications ---------- */
+.notify-btn.hidden, .install-hint.hidden { display: none; }
+#waitbar .notify-btn, #waitbar .install-hint { background: #f2c94c; color: #3d2f00; }
+#resend-btn { background: #e7efe2; color: #1f6e31; }
+p.install-hint {
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
 }
