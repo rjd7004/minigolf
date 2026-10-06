@@ -19,6 +19,10 @@
   const BALL_R = 8;
   const HOLE_R = 12;
   const HOLES = 5;
+  // Spinners: a hub with 1-4 spiked spokes. Their size is set where they're placed.
+  const SPINNER_HUB = 7;
+  const SPINNER_SPOKE = 3; // half-thickness of a spoke
+  const SPINNER_RPMS = [10, 16, 22, 28, 34, 40];
 
   const COLS = 5;
   const ROWS = 8;
@@ -29,11 +33,11 @@
 
   // Per-hole difficulty settings, hole 1 (easiest) to hole 5 (hardest).
   const LEVELS = [
-    { rows: 5, turns: [0, 1], widen: 0.5, bumpers: [1, 1], solids: [0, 1], wedges: [0, 1], sand: [0, 0], water: [0, 0], slopes: [0, 0] },
-    { rows: 6, turns: [1, 2], widen: 0.4, bumpers: [1, 2], solids: [1, 2], wedges: [1, 1], sand: [0, 1], water: [0, 0], slopes: [1, 1] },
-    { rows: 7, turns: [1, 3], widen: 0.3, bumpers: [1, 2], solids: [1, 2], wedges: [1, 2], sand: [0, 1], water: [0, 1], slopes: [1, 2] },
-    { rows: 8, turns: [2, 3], widen: 0.25, bumpers: [2, 3], solids: [2, 3], wedges: [1, 2], sand: [1, 1], water: [1, 1], slopes: [1, 2] },
-    { rows: 8, turns: [2, 4], widen: 0.2, bumpers: [2, 3], solids: [2, 4], wedges: [1, 2], sand: [0, 1], water: [1, 2], slopes: [2, 3] },
+    { rows: 5, turns: [0, 1], widen: 0.5, bumpers: [1, 1], solids: [0, 1], wedges: [0, 1], sand: [0, 0], water: [0, 0], slopes: [0, 0], spinners: [0, 0] },
+    { rows: 6, turns: [1, 2], widen: 0.4, bumpers: [1, 2], solids: [1, 2], wedges: [1, 1], sand: [0, 1], water: [0, 0], slopes: [1, 1], spinners: [0, 1] },
+    { rows: 7, turns: [1, 3], widen: 0.3, bumpers: [1, 2], solids: [1, 2], wedges: [1, 2], sand: [0, 1], water: [0, 1], slopes: [1, 2], spinners: [1, 1] },
+    { rows: 8, turns: [2, 3], widen: 0.25, bumpers: [2, 3], solids: [2, 3], wedges: [1, 2], sand: [1, 1], water: [1, 1], slopes: [1, 2], spinners: [1, 2] },
+    { rows: 8, turns: [2, 4], widen: 0.2, bumpers: [2, 3], solids: [2, 4], wedges: [1, 2], sand: [0, 1], water: [1, 2], slopes: [2, 3], spinners: [1, 2] },
   ];
 
   // Rotations for obstacles as exact cos/sin pairs (no trig at runtime).
@@ -180,7 +184,7 @@
   // ---------- Obstacles ----------
   function placeObstacles(rand, lv, layout, scale) {
     const { grid, tee, cup } = layout;
-    const course = { solids: [], bumpers: [], sand: [], water: [], slopes: [] };
+    const course = { solids: [], bumpers: [], sand: [], water: [], slopes: [], spinners: [] };
     const free = [];
     for (let r = 0; r < ROWS; r++) {
       for (let c = 0; c < COLS; c++) {
@@ -322,6 +326,48 @@
         break;
       }
     }
+
+    // Spinners, each turning at its own speed. They only go where there's
+    // more than a ball's width of room all the way round their sweep, so a
+    // ball can always roll round one and never gets pinned against a wall.
+    const edges = buildWalls(grid);
+    for (const sol of course.solids) {
+      for (let i = 0; i < sol.pts.length; i++) {
+        const a = sol.pts[i];
+        const b = sol.pts[(i + 1) % sol.pts.length];
+        edges.push({ ax: a[0], ay: a[1], bx: b[0], by: b[1] });
+      }
+    }
+    const rpms = SPINNER_RPMS.slice();
+    for (let n = count(lv.spinners); n > 0; n--) {
+      for (let i = 0; i < 24; i++) {
+        const [r, c] = rand.pick(free);
+        if (course.slopes.some((sl) => sl.r === r && sl.c === c)) continue;
+        // Centre it in a cell, or on the edge shared with a neighbouring cell
+        // (which is how it finds the wider open areas).
+        const rect = cellRect(r, c);
+        const spots = [[rect.x + CW / 2, rect.y + CH / 2]];
+        if (inGrid(grid, r, c + 1)) spots.push([rect.x + CW, rect.y + CH / 2]);
+        if (inGrid(grid, r + 1, c)) spots.push([rect.x + CW / 2, rect.y + CH]);
+        const [x, y] = rand.pick(spots);
+        let room = Infinity;
+        for (const e of edges) room = Math.min(room, Math.sqrt(segDist2(x, y, e.ax, e.ay, e.bx, e.by)));
+        for (const b of course.bumpers) room = Math.min(room, Math.sqrt((x - b.x) * (x - b.x) + (y - b.y) * (y - b.y)) - b.r);
+        const len = Math.min(32, Math.floor(room - 2 * BALL_R - 6));
+        // Keep a ball's width between its reach and anything else (other spinners
+        // included), so a ball slid out of one never lands in another.
+        if (len < 18 || !clear(x, y, len + 2 * BALL_R)) continue;
+        taken.push({ x, y, r: len + 2 * BALL_R });
+        const rpm = rpms.splice(rand.int(0, rpms.length - 1), 1)[0];
+        course.spinners.push({
+          x, y, len,
+          spokes: rand.int(1, 4),
+          rpm: rand.chance(0.5) ? rpm : -rpm, // sign = direction
+          phase: (rand.int(0, 11) * Math.PI) / 6,
+        });
+        break;
+      }
+    }
     return course;
   }
 
@@ -366,6 +412,8 @@
         if (course.water.some((w) => x > w.x && x < w.x + w.w && y > w.y && y < w.y + w.h)) continue;
         if (course.bumpers.some((b) => (x - b.x) * (x - b.x) + (y - b.y) * (y - b.y) < (b.r + clearance) * (b.r + clearance))) continue;
         if (course.solids.some((s) => pointInPolygon(x, y, s.pts))) continue;
+        // A spinner's sweep is passable (with timing); only its hub blocks.
+        if (course.spinners.some((s) => (x - s.x) * (x - s.x) + (y - s.y) * (y - s.y) < (SPINNER_HUB + clearance) * (SPINNER_HUB + clearance))) continue;
         let blocked = false;
         for (const s of segs) {
           if (segDist2(x, y, s.ax, s.ay, s.bx, s.by) < c2) { blocked = true; break; }
@@ -461,5 +509,5 @@
     return r >= 0 && r < ROWS && c >= 0 && c < COLS && course.grid[r][c];
   }
 
-  root.MiniGolfCourse = { generateRound, generateHole, inFairway, pointInPolygon, HOLES, W, H, BALL_R, HOLE_R };
+  root.MiniGolfCourse = { generateRound, generateHole, inFairway, pointInPolygon, HOLES, W, H, BALL_R, HOLE_R, SPINNER_HUB, SPINNER_SPOKE };
 })(typeof window !== 'undefined' ? window : globalThis);
