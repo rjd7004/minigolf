@@ -32,6 +32,7 @@ On iOS, "Add to Home Screen" runs it full screen.
 
 The version shows in the bottom-right corner. It's set in `index.html`: when releasing, bump the label and the two `?v=` links to the stylesheet and script (the `?v=` makes phones fetch the new files instead of a cached copy).
 
+- v1.3: lower max power, faster early slowdown, smaller and tougher cup, new drop-in animation
 - v1.2: version label
 - v1.1: smoother roll-out, ball can ride the rim of the cup
 - v1.0: first release (same-phone and play-a-friend link modes)

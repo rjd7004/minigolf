@@ -6,22 +6,26 @@
   const W = 400;
   const H = 700;
   const BALL_R = 8;
-  const HOLE_R = 13;
-  const MAX_SPEED = 1150;     // world units / second at full power
+  const HOLE_R = 12;
+  const MAX_SPEED = 950;      // world units / second at full power
   const MAX_DRAG = 150;       // drag distance (world units) for full power
   const MIN_POWER = 0.05;     // shorter drags are treated as a cancel
-  // Rolling resistance is mostly proportional to speed, so the ball slows
-  // exponentially and glides to a stop instead of braking hard at the end.
-  const ROLL_FRICTION = 20;   // small constant deceleration so it does finally stop
-  const DRAG_COEF = 0.9;      // speed-proportional deceleration (per second)
+  // Rolling resistance: a speed-squared term bleeds off hard shots quickly, a
+  // speed-proportional term gives the long gentle roll-out, and a small constant
+  // term makes sure the ball does finally stop.
+  const ROLL_FRICTION = 20;
+  const DRAG_COEF = 0.9;      // per second
+  const DRAG_QUAD = 0.001;    // per world unit
   const SAND_MULT = 5;
   const STOP_SPEED = 4;
   // The cup: while the ball's centre is over it, the slope pulls the ball toward
   // the middle. Fast balls get bent around the rim and roll on; slow ones drop.
-  const CAPTURE_SPEED = 480;  // max speed that drops when dead-centre; less toward the edge
+  const CAPTURE_SPEED = 260;  // max speed that drops when dead-centre; less toward the edge
   const RIM_PULL = 4200;      // how hard the lip bends the ball's path toward the cup centre
-  const RIM_WIDTH = 3;        // the lip starts this far outside the cup edge
+  const RIM_TURN = 5;         // max turn rate (radians / second) for slow balls
+  const RIM_WIDTH = 0;        // the lip starts this far outside the cup edge
   const RIM_DRAG = 0.997;     // speed kept per physics step while riding the rim
+  const SINK_TIME = 0.45;     // seconds for the ball to drop out of sight
   const RESTITUTION = 0.75;
   const MAX_STROKES = 10;
   const PAR = 3;
@@ -273,7 +277,7 @@
   }
 
   function startAnim(kind, ball, player, onDone) {
-    state.anim = { kind, t: 0, x: ball.x, y: ball.y, player, onDone };
+    state.anim = { kind, t: 0, x: ball.x, y: ball.y, vx: ball.vx, vy: ball.vy, player, onDone };
     state.phase = 'anim';
   }
 
@@ -758,7 +762,7 @@
   function physicsStep(b, from, dt) {
     let speed = Math.hypot(b.vx, b.vy);
 
-    let decel = ROLL_FRICTION + speed * DRAG_COEF;
+    let decel = ROLL_FRICTION + speed * DRAG_COEF + speed * speed * DRAG_QUAD;
     if (inSand(b)) decel *= SAND_MULT;
     const newSpeed = Math.max(0, speed - decel * dt);
     if (speed > 0) {
@@ -780,13 +784,19 @@
     const hy = COURSE.hole.y - b.y;
     const hd = Math.hypot(hx, hy);
     speed = Math.hypot(b.vx, b.vy);
-    if (hd < HOLE_R && speed < CAPTURE_SPEED * Math.sqrt(1 - hd / HOLE_R)) return 'sink';
+    if (hd < HOLE_R && speed < CAPTURE_SPEED * (1 - hd / HOLE_R)) return 'sink';
     if (hd < HOLE_R + RIM_WIDTH && hd > 0.01 && speed > 0) {
-      b.vx += (hx / hd) * RIM_PULL * dt;
-      b.vy += (hy / hd) * RIM_PULL * dt;
-      const k = (speed * RIM_DRAG) / Math.hypot(b.vx, b.vy);
-      b.vx *= k;
-      b.vy *= k;
+      // Turn the velocity toward the cup centre. Fast balls are bent by a fixed
+      // pull (so less the faster they go); slow balls are capped at RIM_TURN so
+      // the cup can't steer a dribbling ball straight into the middle.
+      const turn = Math.min(RIM_TURN, RIM_PULL / speed) * dt;
+      const side = Math.sign(b.vx * hy - b.vy * hx); // which way the centre is
+      const c = Math.cos(turn * side);
+      const s = Math.sin(turn * side);
+      const vx = b.vx * c - b.vy * s;
+      const vy = b.vx * s + b.vy * c;
+      b.vx = vx * RIM_DRAG;
+      b.vy = vy * RIM_DRAG;
       if (!b.onRim) {
         b.onRim = true;
         sound.rim();
@@ -1073,14 +1083,55 @@
   }
 
 
+  function sinkRadius(p) {
+    return BALL_R * (1 - 0.35 * p);
+  }
+
+  // Keep the dropping ball moving the way it was going, slowing fast and
+  // knocking off the back of the cup instead of being sucked to the centre.
+  function updateSink(a, dt) {
+    const k = Math.exp(-7 * dt);
+    a.vx *= k;
+    a.vy *= k;
+    a.x += a.vx * dt;
+    a.y += a.vy * dt;
+    const h = COURSE.hole;
+    const dx = a.x - h.x;
+    const dy = a.y - h.y;
+    const d = Math.hypot(dx, dy);
+    const p = Math.min(a.t / SINK_TIME, 1);
+    const lim = HOLE_R - sinkRadius(p) * p; // starts at the rim, tightens as it drops
+    if (d > lim && d > 0) {
+      const nx = dx / d;
+      const ny = dy / d;
+      a.x = h.x + nx * lim;
+      a.y = h.y + ny * lim;
+      const vn = a.vx * nx + a.vy * ny;
+      if (vn > 0) {
+        a.vx -= 1.3 * vn * nx;
+        a.vy -= 1.3 * vn * ny;
+      }
+    }
+  }
+
   function drawAnim() {
     const a = state.anim;
     if (a.kind === 'sink') {
-      const t = Math.min(a.t / 0.35, 1);
+      // The ball drops where it went in: it shrinks and darkens, and anything
+      // outside the cup edge is clipped so it looks like it's below the rim.
+      const p = Math.min(a.t / SINK_TIME, 1);
       const h = COURSE.hole;
-      const x = a.x + (h.x - a.x) * t;
-      const y = a.y + (h.y - a.y) * t;
-      drawBall(x, y, COLORS[a.player], 1 - t * 0.6, BALL_R * (1 - t * 0.5));
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(h.x, h.y, HOLE_R + BALL_R * (1 - p) * 1.2, 0, Math.PI * 2);
+      ctx.clip();
+      const r = sinkRadius(p);
+      drawBall(a.x, a.y, COLORS[a.player], 1, r);
+      ctx.beginPath();
+      ctx.arc(a.x, a.y, r + 0.5, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(10,25,15,${0.75 * p})`;
+      ctx.fill();
+      ctx.restore();
       return;
     }
     const t = a.t / 0.8;
@@ -1149,7 +1200,8 @@
     } else if (state.phase === 'anim' && state.anim) {
       const a = state.anim;
       a.t += dt;
-      if (a.t > (a.kind === 'sink' ? 0.6 : 0.9)) {
+      if (a.kind === 'sink') updateSink(a, dt);
+      if (a.t > (a.kind === 'sink' ? SINK_TIME + 0.25 : 0.9)) {
         state.anim = null;
         a.onDone();
       }
@@ -1206,7 +1258,7 @@
       hit: (p) => { tone(900, 0.06, 'triangle', 0.25 + p * 0.3, 500); noise(0.04, 0.2, 3000); },
       wall: (p) => tone(320, 0.05, 'square', 0.04 + p * 0.12, 200),
       rim: () => tone(1400, 0.07, 'triangle', 0.12, 900),
-      sink: () => { tone(500, 0.12, 'sine', 0.35, 250); setTimeout(() => tone(700, 0.18, 'sine', 0.3, 1000), 140); },
+      sink: () => { tone(220, 0.14, 'sine', 0.45, 110); noise(0.06, 0.25, 1200); setTimeout(() => tone(160, 0.12, 'sine', 0.3, 90), 120); },
       splash: () => noise(0.5, 0.35, 900),
     };
   })();
