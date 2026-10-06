@@ -37,11 +37,15 @@
   const RIM_DRAG = 0.997;     // speed kept per physics step while riding the rim
   const SINK_TIME = 0.45;     // seconds for the ball to drop out of sight
   const RESTITUTION = 0.75;
+  const SLOPE_BOUNCE = 0.3;   // wall bounce when a slope is pushing the ball into that wall
   // Bumpers fire the ball back out, adding speed like a pinball bumper.
   const BUMPER_RESTITUTION = 0.95;
   const BUMPER_KICK = 380;    // extra speed added away from the bumper on every hit
   const MAX_SHOTS_SENT = 24;  // shots carried in a link for the other phone to replay
   const STEP = 1 / 240;       // fixed physics step (small enough to avoid tunnelling)
+  const SPINNER_RESTITUTION = 0.6;
+  const SPINNER_HUB = Gen.SPINNER_HUB;
+  const SPINNER_SPOKE = Gen.SPINNER_SPOKE;
 
   const COLORS = ['#ff5a5f', '#3b82f6'];
 
@@ -82,6 +86,7 @@
     anim: null,     // { kind: 'sink' | 'splash', t, x, y, player, onDone }
     aim: null,      // { sx, sy, cx, cy } in world coords while dragging
     time: 0,
+    spinT: 0,       // spinner clock (seconds); each shot records it so replays line up
   };
 
   function makePlayer(name) {
@@ -232,8 +237,10 @@
     angle = Math.round(angle * 1e4) / 1e4;
     p.strokes++;
     const from = { x: p.ball.x, y: p.ball.y };
+    // Spinners are where the clock says; the replay restarts the clock from here.
+    state.spinT = Math.round((state.spinT % 3600) * 1000) / 1000;
     if (isLink()) {
-      state.shots.push({ p: state.turn, h: state.hole, x: from.x, y: from.y, a: angle, w: power });
+      state.shots.push({ p: state.turn, h: state.hole, x: from.x, y: from.y, a: angle, w: power, t: state.spinT });
       if (state.shots.length > MAX_SHOTS_SENT) state.shots.shift();
     }
     launch(p.ball, from, power, angle);
@@ -631,7 +638,7 @@
 
   function encodeGame() {
     return b64urlEncode(JSON.stringify({
-      v: 2,
+      v: 3,
       i: state.id,
       s: state.seq,
       k: state.seed,
@@ -640,7 +647,7 @@
       t: state.turn,
       f: state.starter,
       p: state.players.map((p) => [p.name, p.scores, p.strokes, p.done ? 1 : 0, p.ball.x, p.ball.y]),
-      l: state.shots.map((s) => [s.p, s.h, s.x, s.y, s.a, s.w]),
+      l: state.shots.map((s) => [s.p, s.h, s.x, s.y, s.a, s.w, s.t]),
     }));
   }
 
@@ -648,11 +655,11 @@
   function decodeGame(code) {
     try {
       const o = JSON.parse(b64urlDecode(code));
-      if (o && o.v === 1) return 'old';
+      if (o && (o.v === 1 || o.v === 2)) return 'old'; // holes were built differently before spinners
       const num = (n, lo, hi) => typeof n === 'number' && Number.isFinite(n) && n >= lo && n <= hi;
       const int = (n, lo, hi) => Number.isInteger(n) && n >= lo && n <= hi;
       const bit = (n) => n === 0 || n === 1;
-      if (o.v !== 2 || typeof o.i !== 'string' || !/^[a-z0-9]{1,16}$/.test(o.i)) return null;
+      if (o.v !== 3 || typeof o.i !== 'string' || !/^[a-z0-9]{1,16}$/.test(o.i)) return null;
       if (!int(o.s, 0, 1e6) || !int(o.k, 0, 4294967295) || !int(o.h, 0, HOLES - 1)) return null;
       if (!bit(o.o) || !bit(o.t) || !bit(o.f)) return null;
       if (!Array.isArray(o.p) || o.p.length !== 2) return null;
@@ -682,9 +689,9 @@
       if (Array.isArray(o.l)) {
         for (const s of o.l.slice(-MAX_SHOTS_SENT)) {
           if (!Array.isArray(s)) continue;
-          const [p, h, x, y, a, w] = s;
-          if (bit(p) && int(h, 0, o.h) && num(x, 0, W) && num(y, 0, H) && num(a, -10, 10) && num(w, 0, 1)) {
-            shots.push({ p, h, x, y, a, w });
+          const [p, h, x, y, a, w, t] = s;
+          if (bit(p) && int(h, 0, o.h) && num(x, 0, W) && num(y, 0, H) && num(a, -10, 10) && num(w, 0, 1) && num(t, 0, 3600)) {
+            shots.push({ p, h, x, y, a, w, t });
           }
         }
       }
@@ -896,6 +903,7 @@
     showBanner(label, COLORS[shot.p], 1000);
     setTimeout(() => {
       if (!state.roll || state.roll.ball !== ball) return; // game changed meanwhile
+      state.spinT = shot.t;
       launch(ball, from, shot.w, shot.a);
       sound.hit(shot.w);
       state.phase = 'rolling';
@@ -1006,7 +1014,7 @@
     const g = r.status === 200 && r.data ? decodeGame(r.data.code) : null;
     if (!g || g === 'old' || g.id !== id) {
       showMenu();
-      showBanner("Couldn't load that game", '#c0392b', 3000);
+      showBanner(g === 'old' ? 'That game is from an older version. Start a new game!' : "Couldn't load that game", '#c0392b', 3000);
       return;
     }
     applyGame(g, p === '0' ? 0 : p === '1' ? 1 : undefined);
@@ -1181,11 +1189,16 @@
   }
 
   let lastWallSound = 0;
+  // Downhill push of the slope the ball is on this step (0,0 if none).
+  let slopePush = { x: 0, y: 0 };
   function bounce(b, nx, ny) {
     const vn = b.vx * nx + b.vy * ny;
     if (vn >= 0) return;
-    b.vx -= (1 + RESTITUTION) * vn * nx;
-    b.vy -= (1 + RESTITUTION) * vn * ny;
+    // A slope pushing the ball into this wall soaks up most of the bounce,
+    // so a ball that runs down a slope settles instead of rocking for ages.
+    const e = slopePush.x * nx + slopePush.y * ny < 0 ? SLOPE_BOUNCE : RESTITUTION;
+    b.vx -= (1 + e) * vn * nx;
+    b.vy -= (1 + e) * vn * ny;
     if (-vn > 60 && state.time - lastWallSound > 0.06) {
       lastWallSound = state.time;
       sound.wall(Math.min(-vn / MAX_SPEED, 1));
@@ -1229,16 +1242,87 @@
     sound.bump();
   }
 
+  function spokeAngle(sp, k) {
+    return sp.phase + (sp.rpm * Math.PI / 30) * state.spinT + (k * 2 * Math.PI) / sp.spokes;
+  }
+
+  // Spinners: a fixed hub, plus spokes that hit the ball with their own
+  // speed, so a spoke sweeping into the ball bats it along.
+  function collideSpinner(b, sp) {
+    const dx = b.x - sp.x;
+    const dy = b.y - sp.y;
+    const reach = sp.len + BALL_R + SPINNER_SPOKE;
+    if (dx * dx + dy * dy > reach * reach) return;
+    const hd = Math.hypot(dx, dy);
+    const hubMin = SPINNER_HUB + BALL_R;
+    if (hd < hubMin && hd > 0) {
+      b.x = sp.x + (dx / hd) * hubMin;
+      b.y = sp.y + (dy / hd) * hubMin;
+      bounce(b, dx / hd, dy / hd);
+    }
+    const w = (sp.rpm * Math.PI) / 30; // radians per second
+    const min = BALL_R + SPINNER_SPOKE;
+    for (let k = 0; k < sp.spokes; k++) {
+      const ang = spokeAngle(sp, k);
+      const ex = Math.cos(ang) * sp.len;
+      const ey = Math.sin(ang) * sp.len;
+      const t = Math.max(0, Math.min(1, ((b.x - sp.x) * ex + (b.y - sp.y) * ey) / (sp.len * sp.len)));
+      const px = sp.x + ex * t;
+      const py = sp.y + ey * t;
+      const qx = b.x - px;
+      const qy = b.y - py;
+      const d = Math.hypot(qx, qy);
+      if (d >= min || d === 0) continue;
+      const nx = qx / d;
+      const ny = qy / d;
+      b.x = px + nx * min;
+      b.y = py + ny * min;
+      const svx = -w * (py - sp.y); // spoke surface velocity at the contact point
+      const svy = w * (px - sp.x);
+      const vn = (b.vx - svx) * nx + (b.vy - svy) * ny;
+      if (vn < 0) {
+        b.vx -= (1 + SPINNER_RESTITUTION) * vn * nx;
+        b.vy -= (1 + SPINNER_RESTITUTION) * vn * ny;
+        sp.hitAt = state.time;
+        if (-vn > 40 && state.time - lastWallSound > 0.06) {
+          lastWallSound = state.time;
+          sound.wall(Math.min(-vn / MAX_SPEED, 1));
+        }
+      }
+    }
+  }
+
+  // A ball never rests inside a spinner's sweep: slide it straight out from
+  // the hub to just past the spokes. (Spinners always have room around them.)
+  function clearOfSpinners(c, b) {
+    for (const sp of c.spinners) {
+      const dx = b.x - sp.x;
+      const dy = b.y - sp.y;
+      const d = Math.hypot(dx, dy);
+      const need = sp.len + BALL_R + SPINNER_SPOKE + 1;
+      if (d >= need) continue;
+      const ux = d > 0.01 ? dx / d : 0;
+      const uy = d > 0.01 ? dy / d : 1;
+      b.x = sp.x + ux * need;
+      b.y = sp.y + uy * need;
+    }
+  }
+
   // Advance a moving ball by one fixed step. Returns 'sink', 'water', 'stop' or null.
   function physicsStep(b, from, dt) {
     const c = course();
+    state.spinT += dt;
+    const x0 = b.x;
+    const y0 = b.y;
 
     // Slopes push the ball downhill.
     let onSlope = false;
+    slopePush = { x: 0, y: 0 };
     for (const s of c.slopes) {
       if (b.x >= s.x && b.x < s.x + s.w && b.y >= s.y && b.y < s.y + s.h) {
         b.vx += s.dx * s.a * dt;
         b.vy += s.dy * s.a * dt;
+        slopePush = { x: s.dx, y: s.dy };
         onSlope = true;
       }
     }
@@ -1258,6 +1342,7 @@
 
     for (const s of c.segments) collideSegment(b, s);
     for (const bump of c.bumpers) collideBumper(b, bump);
+    for (const sp of c.spinners) collideSpinner(b, sp);
 
     // Hole: slower than the capture speed for how far off-centre it is and it
     // drops. Otherwise the lip bends its path toward the cup (without adding
@@ -1302,13 +1387,17 @@
       b.vx = b.vy = 0;
     }
 
-    if (speed < STOP_SPEED && !magnet) {
+    // Judge "stopped" by how far the ball really moved too: a ball wedged in a
+    // corner with a slope pushing it in keeps a little velocity but goes nowhere.
+    const moved = Math.hypot(b.x - x0, b.y - y0) / dt;
+    if (Math.min(speed, moved) < STOP_SPEED && !magnet) {
       // On a slope the ball only counts as stopped once it's settled (e.g.
       // against a wall), not at the top of its roll back down.
       b.slowT = (b.slowT || 0) + dt;
       if (!onSlope || b.slowT > SLOPE_SETTLE) {
         b.vx = b.vy = 0;
-        return 'stop';
+        clearOfSpinners(c, b);
+        return inWater(c, b) ? 'water' : 'stop';
       }
     } else {
       b.slowT = 0;
@@ -1425,6 +1514,63 @@
     ctx.fill();
   }
 
+  function drawSpinner(sp) {
+    // Faint ring showing how far the spokes reach.
+    ctx.save();
+    ctx.setLineDash([4, 6]);
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = 'rgba(255,255,255,0.28)';
+    ctx.beginPath();
+    ctx.arc(sp.x, sp.y, sp.len + SPINNER_SPOKE, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+    const flash = sp.hitAt !== undefined && state.time - sp.hitAt < 0.12;
+    for (const pass of ['shadow', 'spoke']) {
+      for (let k = 0; k < sp.spokes; k++) {
+        const ang = spokeAngle(sp, k);
+        const ux = Math.cos(ang);
+        const uy = Math.sin(ang);
+        const oy = pass === 'shadow' ? 3 : 0;
+        const base = SPINNER_SPOKE + 1.5;
+        const tip = sp.len + SPINNER_SPOKE;
+        // A spike: wide at the hub, tapering to a point.
+        ctx.beginPath();
+        ctx.moveTo(sp.x - uy * base, sp.y + ux * base + oy);
+        ctx.lineTo(sp.x + ux * (tip - 9) - uy * SPINNER_SPOKE, sp.y + uy * (tip - 9) + ux * SPINNER_SPOKE + oy);
+        ctx.lineTo(sp.x + ux * tip, sp.y + uy * tip + oy);
+        ctx.lineTo(sp.x + ux * (tip - 9) + uy * SPINNER_SPOKE, sp.y + uy * (tip - 9) - ux * SPINNER_SPOKE + oy);
+        ctx.lineTo(sp.x + uy * base, sp.y - ux * base + oy);
+        ctx.closePath();
+        if (pass === 'shadow') {
+          ctx.fillStyle = 'rgba(0,0,0,0.25)';
+          ctx.fill();
+          continue;
+        }
+        ctx.fillStyle = flash ? '#8a929c' : '#5b636d';
+        ctx.fill();
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = '#2f343a';
+        ctx.stroke();
+        // Red spike tip
+        ctx.beginPath();
+        ctx.moveTo(sp.x + ux * (tip - 9) - uy * SPINNER_SPOKE, sp.y + uy * (tip - 9) + ux * SPINNER_SPOKE);
+        ctx.lineTo(sp.x + ux * tip, sp.y + uy * tip);
+        ctx.lineTo(sp.x + ux * (tip - 9) + uy * SPINNER_SPOKE, sp.y + uy * (tip - 9) - ux * SPINNER_SPOKE);
+        ctx.closePath();
+        ctx.fillStyle = '#e5484d';
+        ctx.fill();
+      }
+    }
+    ctx.beginPath();
+    ctx.arc(sp.x, sp.y, SPINNER_HUB, 0, Math.PI * 2);
+    ctx.fillStyle = '#2b2f33';
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(sp.x, sp.y, SPINNER_HUB * 0.4, 0, Math.PI * 2);
+    ctx.fillStyle = '#b8c0c8';
+    ctx.fill();
+  }
+
   function drawCourse() {
     const c = course();
 
@@ -1537,6 +1683,7 @@
     }
 
     for (const b of c.bumpers) drawBumper(b);
+    for (const sp of c.spinners) drawSpinner(sp);
 
     // Hole
     const h = c.hole;
@@ -1770,6 +1917,7 @@
     const dt = Math.min((now - last) / 1000, 0.05);
     last = now;
     state.time += dt;
+    if (!(state.phase === 'rolling' && state.roll)) state.spinT = (state.spinT + dt) % 3600;
 
     if (state.phase === 'rolling' && state.roll) {
       acc += dt;

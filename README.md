@@ -17,7 +17,7 @@ The whole game is stored in the link itself (the part after `#`), so there's no 
 - Touch anywhere on the course and **drag back** to aim. The dotted arrow shows where the ball will go; pull further for more power (the ring around the ball fills up). Let go to putt. A tiny drag cancels.
 - Players alternate shots. Once a player sinks the ball, the other keeps going until they hole out. Whoever won the last hole tees off first on the next one.
 - Every round is five new holes that get longer and trickier from hole 1 to hole 5.
-- **Yellow bumpers** kick the ball away and add speed. **Slopes** sit in narrow one-lane corridors. They're shaded light (high side) to dark (low side), and the arrows point downhill, the way the ball gets pushed.
+- **Yellow bumpers** kick the ball away and add speed. **Spinners** have 1 to 4 spiked spokes, each turning at its own speed; the dashed ring shows how far they reach, and a ball never comes to rest inside one. **Slopes** sit in narrow one-lane corridors. They're shaded light (high side) to dark (low side), and the arrows point downhill, the way the ball gets pushed.
 - Hit the ball too hard and it lips out of the cup. Water is a one-stroke penalty and puts you back where you shot from. Sand slows the ball down. A slow ball that stops with its edge over the cup gets drawn in. There's no stroke limit.
 - Lowest total over the five holes wins. **Play again** swaps who tees off first.
 - The **leaderboard** (🏆 on the menu and results screens) tracks wins for every name ever played on that phone. Capitals and extra spaces don't matter, so "riley" and "Riley" are the same player. Each game counts once, even if you reopen its result link.
@@ -37,6 +37,7 @@ On iOS, "Add to Home Screen" runs it full screen.
 
 The version shows in the bottom-right corner. It's set in `index.html`: when releasing, bump the label and every `?v=` link to the stylesheet and scripts (the `?v=` makes phones fetch the new files instead of a cached copy).
 
+- v3.2: spinning spike obstacles (1-4 spokes, each at its own speed); more room at the top of the screen on newer iPhones
 - v3.1: sync server live at minigolf-sync.rjd7004.workers.dev
 - v3.0: optional sync server: turns sync automatically and push notifications when it's your turn; installable Home Screen app
 - v2.1: stronger bumpers, slopes only in corridors, no stroke limit, wins leaderboard, cup draws in slow balls on its edge
