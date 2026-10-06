@@ -36,9 +36,29 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: server
+          wranglerVersion: '4.147.0'
 
       - name: Show server address
         if: steps.check.outputs.skip != '1'
         run: |
           echo "Sync server: ${{ steps.deploy.outputs.deployment-url }}" | tee -a "$GITHUB_STEP_SUMMARY"
           echo "Put that address in config.js (window.MINIGOLF_SERVER)." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Smoke test the live server
+        if: steps.check.outputs.skip != '1'
+        env:
+          URL: ${{ steps.deploy.outputs.deployment-url }}
+        run: |
+          set -e
+          sleep 5
+          id="ci$(date +%s)"
+          echo "vapid: $(curl -fsS "$URL/api/vapid" | head -c 60)..."
+          curl -fsS -X PUT "$URL/api/game/$id" -H 'Content-Type: application/json' -d '{"code":"SMOKE","seq":1}'
+          echo
+          got=$(curl -fsS "$URL/api/game/$id?p=0")
+          echo "read back: $got"
+          echo "$got" | grep -q '"code":"SMOKE"'
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$URL/api/game/$id" -H 'Content-Type: application/json' -d '{"code":"OLD","seq":1}')
+          echo "stale write -> $code"
+          test "$code" = "409"
+          echo "Smoke test passed: store, read back and stale-write check all work." >> "$GITHUB_STEP_SUMMARY"
