@@ -222,13 +222,25 @@
       return { x: p.x + rand.range(-jx, jx), y: p.y + rand.range(-jy, jy) };
     };
 
-    // Slopes fill a whole cell. Arrows point downhill (the way the ball is pushed).
-    const dirs = [[0, -1], [0, 1], [-1, 0], [1, 0]];
-    for (let n = count(lv.slopes); n > 0; n--) {
+    // Slopes only go in choke points: corridor cells one lane wide, open on
+    // two opposite sides only. They run along the corridor, uphill or
+    // downhill, so you have to power up them or ease down them. Arrows point
+    // downhill (the way the ball is pushed).
+    const chokes = free.filter(([r, c]) => {
+      const up = inGrid(grid, r - 1, c);
+      const down = inGrid(grid, r + 1, c);
+      const left = inGrid(grid, r, c - 1);
+      const right = inGrid(grid, r, c + 1);
+      return (up && down && !left && !right) || (left && right && !up && !down);
+    });
+    for (let n = count(lv.slopes); n > 0 && chokes.length; n--) {
       for (let i = 0; i < 10; i++) {
-        const [r, c] = rand.pick(free);
+        const [r, c] = rand.pick(chokes);
         if (course.slopes.some((s) => s.r === r && s.c === c)) continue;
-        const [dx, dy] = rand.pick(dirs);
+        const vertical = inGrid(grid, r - 1, c);
+        const sign = rand.chance(0.5) ? 1 : -1;
+        const dx = vertical ? 0 : sign;
+        const dy = vertical ? sign : 0;
         // Don't put two slopes facing each other side by side (the ball would rock in the dip).
         const clash = course.slopes.some((s) => Math.abs(s.r - r) + Math.abs(s.c - c) === 1 && s.dx === -dx && s.dy === -dy);
         if (clash) continue;
