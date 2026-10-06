@@ -20,7 +20,8 @@
   const STOP_SPEED = 4;
   // The cup: while the ball's centre is over it, the slope pulls the ball toward
   // the middle. Fast balls get bent around the rim and roll on; slow ones drop.
-  const CAPTURE_SPEED = 260;  // max speed that drops when dead-centre; less toward the edge
+  const CAPTURE_SPEED = 290;  // max speed that drops when dead-centre; less toward the edge
+  const CAPTURE_EDGE = 0.15;  // share of CAPTURE_SPEED that still drops right at the edge
   const RIM_PULL = 4200;      // how hard the lip bends the ball's path toward the cup centre
   const RIM_TURN = 5;         // max turn rate (radians / second) for slow balls
   const RIM_WIDTH = 0;        // the lip starts this far outside the cup edge
@@ -784,7 +785,8 @@
     const hy = COURSE.hole.y - b.y;
     const hd = Math.hypot(hx, hy);
     speed = Math.hypot(b.vx, b.vy);
-    if (hd < HOLE_R && speed < CAPTURE_SPEED * (1 - hd / HOLE_R)) return 'sink';
+    const capture = CAPTURE_SPEED * (CAPTURE_EDGE + (1 - CAPTURE_EDGE) * (1 - hd / HOLE_R));
+    if (hd < HOLE_R && speed < capture) return 'sink';
     if (hd < HOLE_R + RIM_WIDTH && hd > 0.01 && speed > 0) {
       // Turn the velocity toward the cup centre. Fast balls are bent by a fixed
       // pull (so less the faster they go); slow balls are capped at RIM_TURN so
