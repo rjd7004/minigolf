@@ -29,13 +29,17 @@
   const RIM_PULL = 4200;      // how hard the lip bends the ball's path toward the cup centre
   const RIM_TURN = 5;         // max turn rate (radians / second) for slow balls
   const RIM_WIDTH = 0;        // the lip starts this far outside the cup edge
+  // Cup "magnet": a slow ball whose edge is over the cup gets drawn in, so a
+  // ball never comes to rest sitting on top of the hole.
+  const MAGNET_R = HOLE_R + 7;  // reach, measured to the ball's centre
+  const MAGNET_SPEED = 70;      // only balls slower than this feel it
+  const MAGNET_PULL = 700;      // acceleration toward the cup centre
   const RIM_DRAG = 0.997;     // speed kept per physics step while riding the rim
   const SINK_TIME = 0.45;     // seconds for the ball to drop out of sight
   const RESTITUTION = 0.75;
   // Bumpers fire the ball back out, adding speed like a pinball bumper.
-  const BUMPER_RESTITUTION = 0.9;
-  const BUMPER_KICK = 230;    // extra speed added away from the bumper on every hit
-  const MAX_STROKES = 10;     // per hole
+  const BUMPER_RESTITUTION = 0.95;
+  const BUMPER_KICK = 380;    // extra speed added away from the bumper on every hit
   const MAX_SHOTS_SENT = 24;  // shots carried in a link for the other phone to replay
   const STEP = 1 / 240;       // fixed physics step (small enough to avoid tunnelling)
 
@@ -52,6 +56,7 @@
   const sharePanel = $('share');
   const joinPanel = $('join');
   const waitBar = $('waitbar');
+  const boardPanel = $('board');
   const cards = [...document.querySelectorAll('.player-card')];
   const nameInputs = [$('name0'), $('name1')];
 
@@ -160,7 +165,7 @@
   // ---------- Starting games ----------
   function newGame(mode, names, starter, me) {
     state.mode = mode;
-    state.id = mode === 'link' ? randomId() : '';
+    state.id = randomId(); // also keys the leaderboard, so a game is only counted once
     state.seq = 0;
     state.me = me;
     state.seed = randomSeed();
@@ -269,10 +274,6 @@
     p.ball.vx = p.ball.vy = 0;
     p.ball.x = Math.round(p.ball.x * 100) / 100;
     p.ball.y = Math.round(p.ball.y * 100) / 100;
-    if (!p.done && p.strokes >= MAX_STROKES) {
-      p.done = true;
-      showBanner(`${nameOf(state.turn)}: max ${MAX_STROKES} strokes`, COLORS[state.turn]);
-    }
     if (state.players.every((q) => q.done)) {
       finishHole();
     } else {
@@ -344,7 +345,7 @@
 
   // ---------- Panels ----------
   function hideOverlays() {
-    [menu, results, sharePanel, joinPanel].forEach((el) => el.classList.add('hidden'));
+    [menu, results, sharePanel, joinPanel, boardPanel].forEach((el) => el.classList.add('hidden'));
     waitBar.classList.add('hidden');
   }
 
@@ -374,6 +375,7 @@
     hideOverlays();
     const totals = state.players.map(total);
     const winner = totals[0] === totals[1] ? -1 : (totals[0] < totals[1] ? 0 : 1);
+    recordResult(winner);
     let title = winner < 0 ? "It's a tie!" : `${nameOf(winner)} wins!`;
     if (isLink() && winner >= 0) title = winner === state.me ? 'You win!' : `${nameOf(winner)} wins!`;
     $('result-title').textContent = title;
@@ -418,7 +420,96 @@
     $('again-btn').textContent = isLink() ? 'Rematch' : 'Play again';
     $('again-btn').classList.toggle('secondary', isLink());
     $('menu-btn').textContent = isLink() ? 'New game' : 'Change players';
+    const board = loadBoard();
+    $('result-wins').textContent = 'All-time wins: ' + state.players
+      .map((p, i) => { const e = board.people[personKey(nameOf(i))]; return `${nameOf(i)} ${e ? e.wins : 0}`; })
+      .join(' · ');
     results.classList.remove('hidden');
+  }
+
+  // ---------- Leaderboard ----------
+  // Every name is its own person (capitals and spaces don't matter). Results
+  // are kept on this phone; each game is counted once, by its id.
+  function personKey(name) {
+    return name.trim().replace(/\s+/g, ' ').toLowerCase();
+  }
+
+  function loadBoard() {
+    try {
+      const b = JSON.parse(localStorage.getItem('minigolf-board') || 'null');
+      if (b && b.people && Array.isArray(b.counted)) return b;
+    } catch (e) { /* fall through */ }
+    return { people: {}, counted: [] };
+  }
+
+  function saveBoard(b) {
+    try {
+      b.counted = b.counted.slice(-500);
+      localStorage.setItem('minigolf-board', JSON.stringify(b));
+    } catch (e) { /* ignore */ }
+  }
+
+  function recordResult(winner) {
+    if (!state.id) return;
+    const b = loadBoard();
+    if (b.counted.includes(state.id)) return;
+    b.counted.push(state.id);
+    state.players.forEach((p, i) => {
+      const name = nameOf(i).trim();
+      const key = personKey(name);
+      if (!key) return;
+      const e = b.people[key] || (b.people[key] = { name, wins: 0, played: 0, ties: 0 });
+      e.name = name; // keep the most recent spelling
+      e.played++;
+      if (winner === i) e.wins++;
+      if (winner < 0) e.ties++;
+    });
+    saveBoard(b);
+  }
+
+  let boardReturn = null;
+  function showBoard(from) {
+    boardReturn = from;
+    [menu, results].forEach((el) => el.classList.add('hidden'));
+    const b = loadBoard();
+    const people = Object.values(b.people).sort((x, y) =>
+      y.wins - x.wins || (y.wins / y.played) - (x.wins / x.played) || y.played - x.played || x.name.localeCompare(y.name));
+    const list = $('board-rows');
+    list.innerHTML = '';
+    if (!people.length) {
+      list.innerHTML = '<p class="sub">No finished games yet. Play a round!</p>';
+    } else {
+      const table = document.createElement('table');
+      table.className = 'scorecard board';
+      const head = table.insertRow();
+      ['', 'Wins', 'Played', 'Win %'].forEach((t) => { head.insertCell().textContent = t; });
+      people.forEach((e, i) => {
+        const row = table.insertRow();
+        const name = row.insertCell();
+        name.innerHTML = '<span class="rank"></span><span class="name"></span>';
+        name.querySelector('.rank').textContent = i + 1;
+        name.querySelector('.name').textContent = e.name;
+        row.insertCell().textContent = e.wins;
+        row.insertCell().textContent = e.played;
+        row.insertCell().textContent = `${Math.round((100 * e.wins) / e.played)}%`;
+        if (i === 0 && e.wins > 0) row.className = 'winner';
+      });
+      list.appendChild(table);
+    }
+    boardPanel.classList.remove('hidden');
+  }
+
+  function closeBoard() {
+    boardPanel.classList.add('hidden');
+    (boardReturn === 'results' ? results : menu).classList.remove('hidden');
+  }
+
+  function resetBoard() {
+    if (!window.confirm('Clear the leaderboard on this phone?')) return;
+    const b = loadBoard();
+    b.people = {}; // keep the counted ids so old result links aren't re-counted
+    saveBoard(b);
+    showBoard(boardReturn);
   }
 
   function showShare() {
@@ -545,8 +636,8 @@
         if (!Array.isArray(a) || typeof a[0] !== 'string' || !Array.isArray(a[1])) return null;
         const scores = a[1];
         const n = scores.length;
-        if (!(n === o.h || (o.h === HOLES - 1 && n === HOLES)) || !scores.every((s) => int(s, 1, 30))) return null;
-        if (!int(a[2], 0, 30)) return null;
+        if (!(n === o.h || (o.h === HOLES - 1 && n === HOLES)) || !scores.every((s) => int(s, 1, 9999))) return null;
+        if (!int(a[2], 0, 9999)) return null;
         const p = makePlayer(a[0].slice(0, 12));
         p.scores = scores;
         p.strokes = a[2];
@@ -815,6 +906,10 @@
   $('start-btn').addEventListener('click', startFromMenu);
   $('again-btn').addEventListener('click', rematch);
   $('menu-btn').addEventListener('click', showMenu);
+  $('board-btn').addEventListener('click', () => showBoard('menu'));
+  $('result-board-btn').addEventListener('click', () => showBoard('results'));
+  $('board-close').addEventListener('click', closeBoard);
+  $('board-reset').addEventListener('click', resetBoard);
   $('send-result-btn').addEventListener('click', (e) => sendLink(e.currentTarget));
   $('share-btn').addEventListener('click', (e) => sendLink(e.currentTarget));
   $('copy-btn').addEventListener('click', (e) => copyLink(e.currentTarget));
@@ -931,6 +1026,11 @@
     speed = Math.hypot(b.vx, b.vy);
     const capture = CAPTURE_SPEED * (CAPTURE_EDGE + (1 - CAPTURE_EDGE) * (1 - hd / HOLE_R));
     if (hd < HOLE_R && speed < capture) return 'sink';
+    const magnet = hd < MAGNET_R && hd > 0.01 && speed < MAGNET_SPEED;
+    if (magnet) {
+      b.vx += (hx / hd) * MAGNET_PULL * dt;
+      b.vy += (hy / hd) * MAGNET_PULL * dt;
+    }
     if (hd < HOLE_R + RIM_WIDTH && hd > 0.01 && speed > 0) {
       // Turn the velocity toward the cup centre. Fast balls are bent by a fixed
       // pull (so less the faster they go); slow balls are capped at RIM_TURN so
@@ -960,7 +1060,7 @@
       b.vx = b.vy = 0;
     }
 
-    if (speed < STOP_SPEED) {
+    if (speed < STOP_SPEED && !magnet) {
       // On a slope the ball only counts as stopped once it's settled (e.g.
       // against a wall), not at the top of its roll back down.
       b.slowT = (b.slowT || 0) + dt;
